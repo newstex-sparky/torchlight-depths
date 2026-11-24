@@ -117,7 +117,12 @@ const player = {
   hasKey: false,
   potionType: null,
   potionCharges: 0,
-  hasKey: false
+  hasKey: false,
+  // Wander AI
+  wanderTarget: new THREE.Vector2(0, 0),
+  wanderRadius: 6,
+  wanderTimer: 0,
+  wanderChangeInterval: 3
 };
 
 // Player body (cloak + armor)
@@ -1362,7 +1367,7 @@ function updateHUD() {
   document.getElementById('hp').textContent = player.hp;
   document.getElementById('gold').textContent = player.gold;
   document.getElementById('depth').textContent = `L${player.level}`;
-  document.getElementById('monsters').textContent = `Monsters slain: ${player.monstersSlain}`;
+  document.getElementById('monsters').textContent = player.monstersSlain;
 }
 
 // ==== Controls ====
@@ -1511,6 +1516,28 @@ function gameLoop(now) {
   // Update player movement
   playerMove(dt);
   
+  // Wander AI: autonomous player movement when no input
+  player.wanderTimer += dt;
+  if (player.wanderTimer >= player.wanderChangeInterval) {
+    player.wanderTarget = new THREE.Vector2(
+      (Math.random() * 2 - 1) * player.wanderRadius,
+      (Math.random() * 2 - 1) * player.wanderRadius
+    );
+    player.wanderTimer = 0;
+  }
+  // Move player toward wander target
+  const dx = player.wanderTarget.x - player.group.position.x;
+  const dz = player.wanderTarget.z - player.group.position.z;
+  const distToTarget = Math.sqrt(dx*dx + dz*dz);
+  if (distToTarget > 0.5) { // not at target yet
+    const speed = 1.5 * dt; // slower walk speed
+    player.group.position.x += (dx / distToTarget) * speed;
+    player.group.position.z += (dz / distToTarget) * speed;
+  }
+  // Keep player in reasonable bounds (dungeon area)
+  player.group.position.x = THREE.MathUtils.clamp(player.group.position.x, -12, 12);
+  player.group.position.z = THREE.MathUtils.clamp(player.group.position.z, -12, 12);
+  
   // Update monster AI
   updateMonsters(dt);
   
@@ -1548,6 +1575,12 @@ function gameLoop(now) {
   const playerNormY = (window.innerHeight - player.group.position.y * 0.8) / window.innerHeight;
   tiltShiftShader.uniforms.playerScreenY.value = THREE.MathUtils.clamp(playerNormY, 0.1, 0.9);
   tiltShiftShader.uniforms.screenH.value = window.innerHeight;
+  
+  // Smooth camera follow: keep player centered in the isometric view
+  const camSpeed = 0.1;
+  camera.position.x += (player.group.position.x + 10 - camera.position.x) * camSpeed;
+  camera.position.z += (player.group.position.z + 10 - camera.position.z) * camSpeed;
+  camera.lookAt(player.group.position.x, player.group.position.y, player.group.position.z);
   
   // Update vignette size
   vignetteMaterial.uniforms.vignette.value = 0.4 + 0.05 * (1 - player.hp / player.maxHp);
@@ -1932,8 +1965,61 @@ function generateNewDungeon() {
     }
   }
   
-  // Rebuild dungeon meshes
+  // Build dungeon meshes
+  // Debug handle for Hermes agent
+  window.__tl = { 
+    scene, 
+    camera, 
+    player: () => ({x: player.group.position.x, z: player.group.position.z}), 
+    monsters: () => monsters.filter(m => !m.dead && !m.collapse).length, 
+    slain: () => player.monstersSlain, 
+    depth: () => player.level 
+  };
   buildDungeonMeshes();
+  
+  // ---- Add monster spawn points ----
+  // Distribute monsters across rooms for the initial level
+  const initialMonsterCount = Math.max(3, 5 - Math.floor(Math.random() * 2)); // 3-5 monsters
+  const monsterTypes = ['skeleton', 'rat', 'slime'];
+  for (let i = 0; i < initialMonsterCount; i++) {
+    const type = monsterTypes[i % 3];
+    // Pick a random room center for spawn
+    const room = rooms[Math.floor(Math.random() * rooms.length)];
+    const sx = room.x + Math.floor(room.w / 2);
+    const sy = room.y + Math.floor(room.h / 2);
+    // Verify the spawn point is on a floor cell
+    if (floorCells.some(c => c[0] === sx && c[1] === sy)) {
+      monsterSpawns.push({ type: type, x: sx, y: sy });
+    } else {
+      // Fall back to random floor cell
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const bx = Math.floor(Math.random() * DW);
+        const by = Math.floor(Math.random() * DH);
+        if (floorCells.some(c => c[0] === bx && c[1] === by)) {
+          monsterSpawns.push({ type: type, x: bx, y: by });
+          break;
+        }
+      }
+    }
+  }
+  
+  // Also add a few extra monsters near the player start area to ensure early engagement
+  for (let i = 0; i < 2; i++) {
+    const bx = Math.floor(Math.random() * 5); // first 5 columns
+    const by = Math.floor(Math.random() * 3); // first 3 rows
+    if (floorCells.some(c => c[0] === bx && c[1] === by)) {
+      monsterSpawns.push({ type: 'rat', x: bx, y: by });
+    }
+  }
+  
+  // Ensure at least 3 monster spawns exist
+  while (monsterSpawns.length < 3) {
+    const bx = Math.floor(Math.random() * DW);
+    const by = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === bx && c[1] === by) && !monsterSpawns.some(s => s.x === bx && s.y === by)) {
+      monsterSpawns.push({ type: monsterTypes[0], x: bx, y: by });
+    }
+  }
   
   // Return updated dungeon reference
   return { floorCells, wallCells, monsterSpawns, props };
