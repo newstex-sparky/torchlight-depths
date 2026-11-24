@@ -1980,7 +1980,6 @@ function generateNewDungeon() {
   // ---- Add monster spawn points ----
   // Distribute monsters across rooms for the initial level
   const initialMonsterCount = Math.max(3, 5 - Math.floor(Math.random() * 2)); // 3-5 monsters
-  const monsterTypes = ['skeleton', 'rat', 'slime'];
   for (let i = 0; i < initialMonsterCount; i++) {
     const type = monsterTypes[i % 3];
     // Pick a random room center for spawn
