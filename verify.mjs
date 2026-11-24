@@ -143,34 +143,47 @@ const started = await page.evaluate(() => ({
 const startPos = { x: A2.px, z: A2.pz };
 console.log('after click: started=' + started.started + ' overlayGone=' + started.overlayGone);
 
-// drive WASD + Space manually for 28s: chase the nearest monster, attack in range
+// drive WASD + Space manually for 34s: phase 1 chases/attacks the nearest
+// monster; phase 2 forces travel if displacement is still short (walk pattern
+// with blocked-direction rotation), so manual movement always covers >2 tiles
 let bufC1 = null, bufC2 = null;
 const drvStart = Date.now();
-while (Date.now() - drvStart < 28000) {
+let heldDir = 0; // index into travelDirs for the forced-travel walk
+let lastPos = { x: startPos.x, z: startPos.z };
+const travelDirs = ['KeyW', 'KeyD', 'KeyS', 'KeyA'];
+while (Date.now() - drvStart < 34000) {
   const elapsed = Date.now() - drvStart;
   if (elapsed > 10500 && !bufC1) bufC1 = await page.screenshot();
   if (elapsed > 20500 && !bufC2) bufC2 = await page.screenshot();
   const st = await page.evaluate(() => ({ x: window.__tl.player.x, z: window.__tl.player.z, mons: window.__tl.monstersAt() }));
-  let target = null, bd = Infinity;
-  for (const m of st.mons) {
-    const d = Math.hypot(m.x - st.x, m.z - st.z);
-    if (d < bd) { bd = d; target = m; }
+  const dispNow = Math.hypot(st.x - startPos.x, st.z - startPos.z);
+  let target = null, bd = Infinity, travel = null;
+  if (elapsed > 20000 && dispNow < 4.2) {
+    // forced travel: rotate through directions, skipping blocked ones
+    const moved = Math.hypot(st.x - lastPos.x, st.z - lastPos.z);
+    if (moved < 0.05) heldDir = (heldDir + 1) % travelDirs.length;
+    travel = travelDirs[heldDir];
+  } else {
+    for (const m of st.mons) {
+      const d = Math.hypot(m.x - st.x, m.z - st.z);
+      if (d < bd) { bd = d; target = m; }
+    }
+    if (target && bd < 30) {
+      const dx = target.x - st.x, dz = target.z - st.z;
+      if (dx > 0.25) travel = 'KeyD'; else if (dx < -0.25) travel = 'KeyA';
+      else if (dz > 0.25) travel = 'KeyS'; else if (dz < -0.25) travel = 'KeyW';
+    }
   }
-  const held = [];
-  if (target && bd < 30) {
-    const dx = target.x - st.x, dz = target.z - st.z;
-    if (dx > 0.25) held.push('KeyD'); else if (dx < -0.25) held.push('KeyA');
-    if (dz > 0.25) held.push('KeyS'); else if (dz < -0.25) held.push('KeyW');
-  }
-  if (!held.length) held.push('KeyW');
-  for (const k of held) await page.keyboard.down(k);
+  if (!travel) travel = travelDirs[heldDir];
+  await page.keyboard.down(travel);
   if (target && bd < 1.9) {
     await page.keyboard.down('Space');
     await page.waitForTimeout(90);
     await page.keyboard.up('Space');
   }
   await page.waitForTimeout(260);
-  for (const k of held) await page.keyboard.up(k);
+  await page.keyboard.up(travel);
+  lastPos = st;
 }
 if (!bufC1) bufC1 = await page.screenshot();
 if (!bufC2) bufC2 = await page.screenshot();
@@ -246,7 +259,7 @@ gate('canvas pixels differ from background >5% (combat frame 2)', bgC2 > 0.05, `
 gate('monsters() >= 3 after live play', gameStats.monsters >= 3, `monsters=${gameStats.monsters}`);
 gate('combat engagement: slain>=1 OR gold>0 OR hp<max', gameStats.slain >= 1 || gameStats.gold > 0 || gameStats.hp < gameStats.maxHp,
   `slain=${gameStats.slain} gold=${gameStats.gold} hp=${gameStats.hp}/${gameStats.maxHp}`);
-gate('player moved from (0,0) by >2 tiles (x+z)', playerMoveDist > 2, `dx+dz=${playerMoveDist.toFixed(2)} (x=${gameStats.px.toFixed(2)} z=${gameStats.pz.toFixed(2)})`);
+gate('player displaced from spawn by >2 tiles (x+z)', displacement > 2, `disp=${displacement.toFixed(2)} world units`);
 gate('zero console errors over 60s', consoleErrors.length === 0, `errors=${consoleErrors.length}${consoleErrors.length ? ' :: ' + consoleErrors.slice(0, 3).join(' | ') : ''}`);
 gate('zero page errors over 60s', pageErrors.length === 0, `errors=${pageErrors.length}${pageErrors.length ? ' :: ' + pageErrors.slice(0, 3).join(' | ') : ''}`);
 gate("HUD reads 'Monsters slain: N' exactly once", hudCheck.occurrences === 1 && hudCheck.value !== null,
