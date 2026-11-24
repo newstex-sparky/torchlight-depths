@@ -1360,6 +1360,15 @@ function buildDungeonMeshes() {
 }
 
 // Build the dungeon
+// Debug handle for Hermes agent - set at boot level
+window.__tl = { 
+  scene, 
+  camera, 
+  player: () => ({x: player.group.position.x, z: player.group.position.z}), 
+  monsters: () => monsters.filter(m => !m.dead && !m.collapse).length, 
+  slain: () => player.monstersSlain, 
+  depth: () => player.level
+};
 buildDungeonMeshes();
 
 // ==== HUD update ====
