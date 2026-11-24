@@ -16,6 +16,11 @@
   .hud .depth { color:#8aa8cc; }
   .hud .potion { color:#d86a5a; font-size:10px; }
   #soundHint { position:fixed; bottom:8px; right:10px; color:#6a6a6a; font-size:11px; pointer-events:auto; cursor:help; font-family:'Press Start 2P', monospace; }
+  #startOverlay { position:fixed; inset:0; z-index:999; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:auto; cursor:pointer; font-family:'Press Start 2P', monospace; color:#e8d8c8; background:rgba(6,7,12,0.35); }
+  #startOverlay .title { font-size:30px; letter-spacing:2px; text-align:center; text-shadow:0 0 16px #ff7c30, 4px 4px 0 #000; }
+  #startOverlay .subtitle { font-size:13px; margin-top:20px; color:#ffd479; text-shadow:3px 3px 0 #000; animation:tlPulse 1.2s ease-in-out infinite alternate; }
+  #startOverlay .controls { font-size:9px; margin-top:30px; color:#9aa8b8; text-shadow:2px 2px 0 #000; line-height:2.2; text-align:center; }
+  @keyframes tlPulse { from { opacity:0.55; } to { opacity:1; } }
 </style>
 </head>
 <body>
@@ -29,6 +34,11 @@
   <div class="row potion" id="potionHud">Potions: <span id="potionCount">1</span> <span style="color:#6a6a6a">[Q]</span></div>
 </div>
 <div id="soundHint">click for sound</div>
+<div id="startOverlay">
+  <div class="title">TORCHLIGHT DEPTHS</div>
+  <div class="subtitle">&mdash; CLICK TO BEGIN &mdash;</div>
+  <div class="controls">WASD / ARROWS: MOVE<br>SPACE: ATTACK &nbsp; Q: POTION &nbsp; E: INTERACT<br>GAMEPAD SUPPORTED</div>
+</div>
 
 <script type="importmap">
 {
@@ -54,7 +64,7 @@ renderer.shadowMap.type = THREE.PCFShadowMap;
 const scene = new THREE.Scene();
 const BG = new THREE.Color(0x0a0b10);
 scene.background = BG;
-scene.fog = new THREE.Fog(BG, 14, 40);
+scene.fog = new THREE.Fog(BG, 18, 52);
 
 // Isometric-style camera: classic three-quarter angle, smooth follow
 const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 200);
@@ -62,15 +72,21 @@ const CAM_OFFSET = new THREE.Vector3(10.5, 13.5, 10.5);
 camera.position.copy(CAM_OFFSET);
 camera.lookAt(0, 0, 0);
 
-const ambient = new THREE.HemisphereLight(0x2c3b52, 0x0b0d12, 0.55);
+const ambient = new THREE.HemisphereLight(0x3c4a62, 0x14161c, 1.0);
 scene.add(ambient);
+
+// cold "moonlight" fill — keeps the requested cold accents and lifts crushed blacks
+const moontLight = new THREE.DirectionalLight(0x8899cc, 0.3);
+moontLight.position.set(10, 20, 10);
+scene.add(moontLight);
 
 // Hero torch: warm flickering point light + a shadow-casting spot "torch cone"
 // that follows the hero, so shadows of monsters/props/pillars really move.
-const torchLight = new THREE.PointLight(0xffa04a, 2.1, 13, 1.6);
+// Warmed up and widened so the lit pool clearly reads the dungeon.
+const torchLight = new THREE.PointLight(0xff8438, 3.4, 19, 1.4);
 scene.add(torchLight);
 
-const torchSpot = new THREE.SpotLight(0xffb464, 1.6, 26, 0.72, 0.55, 1.2);
+const torchSpot = new THREE.SpotLight(0xff9c4c, 2.6, 32, 0.82, 0.55, 1.25);
 torchSpot.castShadow = true;
 torchSpot.shadow.mapSize.set(1024, 1024);
 torchSpot.shadow.camera.near = 1.5;
@@ -201,6 +217,8 @@ const M = {
   water:   new THREE.MeshPhongMaterial({ color: 0x18324a, shininess: 90, specular: 0x88aaff }),
   metal:   new THREE.MeshPhongMaterial({ color: 0x8a9099, shininess: 60, specular: 0xaabbcc }),
   rug:     new THREE.MeshLambertMaterial({ color: 0x6e2f3a }),
+  slash:   new THREE.MeshBasicMaterial({ color: 0xffe9a0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
+  flashHot:new THREE.MeshBasicMaterial({ color: 0xfff3c0, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false }),
 };
 
 // ============================== LEVEL BUILD ==============================
@@ -213,11 +231,14 @@ let doorMesh = null;
 let stairsPos = { x: 0, z: 0 };
 let propBlocks = [];
 let torchGroups = [];
+let puddleMeshes = [];
+let swayables = [];
 
 function clearLevel() {
   levelGroup.traverse(o => { if (o.isMesh && o.userData.own) o.geometry.dispose(); });
   levelGroup.clear();
   torchSpots = []; chestList = []; pickups = []; doorMesh = null; propBlocks = []; torchGroups = [];
+  puddleMeshes = []; swayables = [];
 }
 
 function buildFloorWalls(depth) {
@@ -225,9 +246,10 @@ function buildFloorWalls(depth) {
   for (let y = 0; y < DH; y++) for (let x = 0; x < DW; x++) {
     if (grid[y][x] !== 1) continue;
     const { x: wx, z: wz } = cellToWorld(x, y);
-    const t = rnd(-0.06, 0.06);
+    const t = rnd(-0.07, 0.07);
     let r = 0.30 + t, g = 0.315 + t, b = 0.34 + t * 0.8;
-    if (Math.random() < 0.05) { r = 0.22; g = 0.31; b = 0.22; } // mossy tile
+    if (Math.random() < 0.10) { r = 0.22; g = 0.31; b = 0.22; } // mossy tile
+    else if (Math.random() < 0.08) { r *= 0.7; g *= 0.7; b *= 0.78; } // cracked stone tile
     specs.push(coloredBox(TILE, 0.18, TILE, wx, -0.09, wz, r, g, b));
   }
   for (let y = 0; y < DH; y++) for (let x = 0; x < DW; x++) {
@@ -242,7 +264,8 @@ function buildFloorWalls(depth) {
     if (!touching) continue;
     const { x: wx, z: wz } = cellToWorld(x, y);
     const s = 0.16 + rnd(-0.045, 0.045);
-    const r = s, g = s + 0.012, b = s + 0.032;
+    let r = s, g = s + 0.012, b = s + 0.032;
+    if (Math.random() < 0.12) { r = s * 0.72; g = s * 1.25; b = s * 0.78; } // mossy wall patch
     if (front) {
       // low cut-away walls keep the isometric interior always visible
       specs.push(coloredBox(TILE, 0.5, TILE, wx, 0.25, wz, r, g, b));
@@ -273,7 +296,7 @@ function addTorch(wx, y, wz, withLight) {
   g.add(sconce, handle, flame, core);
   g.position.set(wx, y, wz);
   if (withLight) {
-    const pl = new THREE.PointLight(0xff9840, withLight === 'big' ? 1.05 : 0.75, withLight === 'big' ? 9 : 6.5, 1.7);
+    const pl = new THREE.PointLight(0xff9840, withLight === 'big' ? 1.8 : 1.25, withLight === 'big' ? 12 : 8.5, 1.6);
     pl.position.set(0, 0.55, 0);
     g.add(pl);
     g.userData.light = pl;
@@ -384,17 +407,21 @@ function buildProps(depth) {
     const g = new THREE.Group(); g.add(p, cap); g.userData.own = true;
     put(g, c);
   }
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 12; i++) {
     const c = randomFloorCell(); if (!c) continue;
     const w = new THREE.Mesh(webGeo, webMat);
-    put(w, c, rnd(0.3, 1.8), false);
+    put(w, c, rnd(0.3, 2.0), false);
     w.rotation.set(rnd(-0.3, 0.3), rnd(0, Math.PI), rnd(-0.3, 0.3));
+    w.userData.swayPhase = rnd(0, Math.PI * 2); w.userData.swayAmp = 0.02;
+    swayables.push(w); // cobwebs tremble faintly
   }
   for (let i = 0; i < 4; i++) {
     const c = randomFloorCell(); if (!c) continue;
     const b = new THREE.Mesh(bannerGeo, Math.random() < 0.5 ? M.cloth : M.clothB);
     put(b, c, rnd(1.2, 2.0), false);
     b.rotation.set(-0.08, rnd(0, Math.PI * 2), 0);
+    b.userData.swayPhase = rnd(0, Math.PI * 2); b.userData.swayAmp = 0.06;
+    swayables.push(b); // banner cloth sways subtly
   }
   for (let i = 0; i < 3; i++) {
     const c = randomFloorCell(); if (!c) continue;
@@ -409,11 +436,13 @@ function buildProps(depth) {
     }
     put(g, c, 0, false);
   }
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 6; i++) {
     const c = randomFloorCell(); if (!c) continue;
-    const p = new THREE.Mesh(new THREE.CircleGeometry(rnd(0.25, 0.45), 12), M.water);
+    const pm = new THREE.MeshPhongMaterial({ color: 0x18324a, shininess: 110, specular: 0xffc980, transparent: true, opacity: 0.85, emissive: 0x000000 });
+    const p = new THREE.Mesh(new THREE.CircleGeometry(rnd(0.25, 0.45), 12), pm);
     p.rotation.x = -Math.PI / 2;
     put(p, c, 0.1, false);
+    puddleMeshes.push({ mesh: p, phase: rnd(0, Math.PI * 2) }); // reflects/wobbles firelight
   }
   for (let i = 0; i < 2; i++) {
     const c = randomFloorCell(); if (!c) continue;
@@ -431,13 +460,13 @@ function buildProps(depth) {
 }
 
 function buildTorchesAndStairs(depth) {
-  // sconces on back walls
+  // sconces on back walls — more numerous, brighter pools
   let placed = 0;
-  for (let y = 0; y < DH && placed < 6; y++) for (let x = 0; x < DW && placed < 6; x++) {
+  for (let y = 0; y < DH && placed < 16; y++) for (let x = 0; x < DW && placed < 16; x++) {
     if (grid[y][x] !== 0) continue;
     const floorBelow = isFloor(x, y - 1);
     const floorLeft = isFloor(x - 1, y);
-    if ((floorBelow || floorLeft) && x + y > 4 && Math.random() < 0.5) {
+    if ((floorBelow || floorLeft) && x + y > 4 && Math.random() < 0.8) {
       const big = placed % 2 === 0;
       const { x: wx, z: wz } = cellToWorld(x, y);
       addTorch(wx + (floorBelow ? 0 : -TILE * 0.55), big ? 1.9 : 1.7, wz + (floorBelow ? -TILE * 0.55 : 0), big ? 'big' : true);
@@ -513,15 +542,15 @@ const hero = {
   group: new THREE.Group(),
   hp: 5, maxHp: 5, gold: 0, potions: 1, slain: 0, depth: 1,
   hasKey: false, cooldown: 0, swing: -1, swingHit: false,
-  walkPhase: 0, flash: 0, hurtTimer: 0, stuckT: 0, wanderT: 0, walking: false,
+  walkPhase: 0, flash: 0, hurtTimer: 0, stuckT: 0, wanderT: 0, walking: false, flinchT: 0,
 };
 scene.add(hero.group);
 
 function buildHero() {
   const g = hero.group;
-  const skin = new THREE.MeshLambertMaterial({ color: 0xc79a6b });
-  const armor = new THREE.MeshLambertMaterial({ color: 0x5a6068 });
-  const cloak = new THREE.MeshLambertMaterial({ color: 0x4a2a38, side: THREE.DoubleSide });
+  const skin = new THREE.MeshLambertMaterial({ color: 0xc79a6b, emissive: 0x5a3a1e });
+  const armor = new THREE.MeshLambertMaterial({ color: 0x5a6068, emissive: 0x2a3648 });
+  const cloak = new THREE.MeshLambertMaterial({ color: 0x4a2a38, emissive: 0x2a1620, side: THREE.DoubleSide });
   hero.legL = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.34, 0.15), armor); hero.legL.position.set(-0.09, 0.32, 0);
   hero.legR = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.34, 0.15), armor); hero.legR.position.set(0.09, 0.32, 0);
   const torso = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.4, 0.24), armor); torso.position.y = 0.68;
@@ -529,6 +558,7 @@ function buildHero() {
   const cape = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.52, 0.1), cloak); cape.position.set(0, 0.72, -0.13);
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), skin); head.position.y = 1.02;
   const hood = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.28, 8), cloak); hood.position.y = 1.12; hood.rotation.x = 0.35;
+  hero.torso = torso;
   // left arm: torch
   hero.armL = new THREE.Group(); hero.armL.position.set(-0.24, 0.86, 0.02);
   const armLMesh = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.3, 0.12), skin); armLMesh.position.y = -0.14;
@@ -552,7 +582,14 @@ function buildHero() {
   sword.position.set(0, -0.3, 0.05);
   sword.rotation.x = 0.4;
   hero.armR.add(armRMesh, sword);
+  // bright emissive slash arc shown during the swing
+  hero.slashArc = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.055, 6, 20, Math.PI * 0.85), M.slash);
+  hero.slashArc.position.set(0, 0.78, 0.3);
+  hero.slashArc.material.opacity = 0;
+  g.add(hero.slashArc);
   g.add(hero.legL, hero.legR, torso, belt, cape, head, hood, hero.armL, hero.armR);
+  // larger, more readable at viewing distance
+  g.scale.setScalar(1.5);
   g.traverse(o => { if (o.isMesh) o.castShadow = true; });
 }
 buildHero();
@@ -579,7 +616,7 @@ function buildMonster(kind) {
     parts.armR = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.32, 0.07), bone); parts.armR.position.set(0.22, 0.72, 0);
     const rib1 = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.03, 0.24), bone); rib1.position.y = 0.78;
     const rib2 = rib1.clone(); rib2.position.y = 0.68;
-    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.032, 6, 5), boss ? M.eyeRed : M.eyeRed); eyeL.position.set(-0.05, 1.05, 0.11);
+    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 5), boss ? M.eyeRed : M.eyeRed); eyeL.position.set(-0.05, 1.05, 0.11);
     const eyeR = eyeL.clone(); eyeR.position.x = 0.05;
     g.add(parts.torso, parts.head, jaw, legL, legR, armL, parts.armR, rib1, rib2, eyeL, eyeR);
     if (boss) {
@@ -593,7 +630,7 @@ function buildMonster(kind) {
     body.geometry.scale(1.5, 0.8, 1); body.position.y = 0.22; parts.torso = body;
     const nose = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.2, 6), M.ratDark);
     nose.rotation.z = Math.PI / 2; nose.position.set(-0.38, 0.2, 0);
-    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 5), M.eyeRed); eyeL.position.set(-0.2, 0.32, 0.1);
+    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 5), M.eyeRed); eyeL.position.set(-0.2, 0.32, 0.1);
     const eyeR = eyeL.clone(); eyeR.position.z = -0.1;
     const earL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 5), M.ratDark); earL.position.set(0.1, 0.42, 0.09);
     const earR = earL.clone(); earR.position.z = -0.09;
@@ -607,12 +644,12 @@ function buildMonster(kind) {
   } else { // slime
     const blob = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), M.slime);
     blob.geometry.scale(1.25, 0.85, 1.25); blob.position.y = 0.24;
-    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.035, 6, 5), M.eyeGreen); eyeL.position.set(-0.08, 0.34, 0.2);
+    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.065, 6, 5), M.eyeGreen); eyeL.position.set(-0.08, 0.34, 0.2);
     const eyeR = eyeL.clone(); eyeR.position.x = 0.08;
     parts.torso = blob;
     g.add(blob, eyeL, eyeR);
   }
-  if (boss) g.scale.setScalar(1.8);
+  if (boss) g.scale.setScalar(2.05);
   g.traverse(o => { if (o.isMesh) o.castShadow = true; });
   return { group: g, parts };
 }
@@ -622,6 +659,17 @@ function spawnMonster(kind, cx, cy) {
   const { x, z } = cellToWorld(cx, cy);
   const { group, parts } = buildMonster(kind);
   group.position.set(x, 0, z);
+  if (kind === 'boss') {
+    // boss is visually unmistakable: red aura light + blood ring at its feet
+    const aura = new THREE.PointLight(0xff3030, 1.6, 9, 1.8);
+    aura.position.y = 1.8;
+    group.add(aura);
+    const ring = new THREE.Mesh(new THREE.RingGeometry(0.7, 0.95, 18),
+      new THREE.MeshBasicMaterial({ color: 0xff3030, transparent: true, opacity: 0.32, side: THREE.DoubleSide, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.06;
+    group.add(ring);
+  }
   levelGroup.add(group);
   const stats = {
     skeleton: { hp: 2 + Math.floor(depth / 4), spd: 1.35, dmg: 1, range: 1.0 },
@@ -653,7 +701,10 @@ function populateMonsters(depth) {
     .map(([dx, dy]) => ({ x: startCell.x + dx, y: startCell.y + dy }))
     .filter(c => isFloor(c.x, c.y));
   for (let i = 0; i < plan.length; i++) {
-    const spot = i < 2 && near.length ? near[i] : randomFloorCell(5) || { x: startCell.x + 2, y: startCell.y + 1 };
+    const spotNear = i < 2 ? near[i] : null;
+    const spot = (spotNear && isFloor(spotNear.x, spotNear.y))
+      ? spotNear
+      : (randomFloorCell(5) || { x: startCell.x + 2, y: startCell.y + 1 });
     if (isFloor(spot.x, spot.y)) spawnMonster(plan[i], spot.x, spot.y);
   }
 }
@@ -682,8 +733,18 @@ function burst(kind, x, z) {
   levelGroup.add(stain);
 }
 
+// hit impacts: bright additive flash at the point of impact
+const hitFlashes = [];
+function impactFlash(x, y, z) {
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.16, 6, 5), M.flashHot.clone());
+  mesh.position.set(x, y, z);
+  mesh.scale.setScalar(0.4);
+  levelGroup.add(mesh);
+  hitFlashes.push({ mesh, t: 0 });
+}
+
 // embers
-const EMBER_N = 80;
+const EMBER_N = 110;
 const emberGeo = new THREE.BufferGeometry();
 const emberPos = new Float32Array(EMBER_N * 3);
 const emberData = [];
@@ -692,13 +753,13 @@ for (let i = 0; i < EMBER_N; i++) {
 }
 emberGeo.setAttribute('position', new THREE.BufferAttribute(emberPos, 3));
 const embers = new THREE.Points(emberGeo, new THREE.PointsMaterial({
-  color: 0xffa040, size: 0.09, transparent: true, opacity: 0.9,
+  color: 0xffa040, size: 0.14, transparent: true, opacity: 0.95,
   blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
 }));
 scene.add(embers);
 
-// dust motes
-const DUST_N = 40;
+// dust motes hanging in the light beams
+const DUST_N = 70;
 const dustGeo = new THREE.BufferGeometry();
 const dustPos = new Float32Array(DUST_N * 3);
 const dustData = [];
@@ -708,7 +769,7 @@ for (let i = 0; i < DUST_N; i++) {
 }
 dustGeo.setAttribute('position', new THREE.BufferAttribute(dustPos, 3));
 const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({
-  color: 0x9aa4b0, size: 0.05, transparent: true, opacity: 0.25, depthWrite: false,
+  color: 0xb0bac6, size: 0.06, transparent: true, opacity: 0.45, depthWrite: false,
 }));
 scene.add(dust);
 
@@ -798,14 +859,44 @@ window.addEventListener('keydown', wakeAudio);
 // ============================== INPUT ==============================
 const keys = {};
 let lastInputTime = -1e9;
+let gameStarted = false;
 const markInput = () => { lastInputTime = performance.now(); };
+
+function startGame() {
+  if (gameStarted) return;
+  gameStarted = true;
+  const ov = document.getElementById('startOverlay');
+  if (ov) ov.style.display = 'none';
+  initAudio();          // a single start also enables audio — never needs a second interaction
+  hint.style.display = 'none';
+  updateHud();
+}
+
 window.addEventListener('keydown', e => {
   keys[e.code] = true;
   markInput();
+  if (!gameStarted) { startGame(); return; }  // any key begins gameplay
   if (e.code === 'KeyQ') drinkPotion();
-  if (e.code === 'Space') e.preventDefault();
+  if (e.code === 'KeyE') tryInteract();
+  if (e.code === 'Space') { heroAttack(); e.preventDefault(); }
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// start overlay: one click begins gameplay (and enables audio)
+{
+  const ov = document.getElementById('startOverlay');
+  if (ov) ov.addEventListener('click', () => startGame());
+}
+
+function anyGamepadInput() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const p of pads) {
+    if (!p) continue;
+    for (const b of p.buttons) if (b && b.pressed) return true;
+    for (const a of p.axes) if (Math.abs(a || 0) > 0.5) return true;
+  }
+  return false;
+}
 
 function gamepadState() {
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -884,7 +975,6 @@ function startLevel(depth) {
   populateMonsters(depth);
   hero.hasKey = false;
   hero.stuckT = 0;
-  aiDecisionT = 0;
   const s = cellToWorld(startCell.x, startCell.y);
   hero.group.position.set(s.x, 0, s.z);
   updateHud();
@@ -898,40 +988,8 @@ function descend() {
   updateHud();
 }
 
-// ============================== HERO AI ==============================
-let aiDecisionT = 0;
-let aiTarget = null;
-let aiMode = 'fight';
-
-function nearestMonster(maxDist) {
-  let best = null, bd = maxDist * maxDist;
-  for (const m of monsters) {
-    if (!m.alive) continue;
-    const d = m.group.position.distanceToSquared(hero.group.position);
-    if (d < bd) { bd = d; best = m; }
-  }
-  return best;
-}
-function nearestLoot() {
-  let best = null, bd = Infinity;
-  // nearest chest first
-  for (const c of chestList) {
-    if (c.opened) continue;
-    const d = Math.hypot(c.group.position.x - hero.group.position.x, c.group.position.z - hero.group.position.z);
-    if (d < bd) { bd = d; best = { type: 'chest', chest: c, x: c.group.position.x, z: c.group.position.z }; }
-  }
-  for (const p of pickups) {
-    if (p.taken || p.type === 'chest') continue;
-    if (p.type === 'key' && hero.hasKey) continue;
-    const d = Math.hypot(p.x - hero.group.position.x, p.z - hero.group.position.z);
-    // the key matters most — grab it first when visible
-    const weight = p.type === 'key' ? d * 0.1 : d;
-    const curBest = best ? (best.type === 'chest' ? Math.hypot(best.x - hero.group.position.x, best.z - hero.group.position.z) : 1) : Infinity;
-    if (weight < bd) { bd = weight; best = p; }
-  }
-  return best;
-}
-
+// ============================== HERO INPUT ==============================
+// (auto hero AI removed — manual controls only after starting; NO self-play)
 function randomReachableCellNear(wx, wz, maxCellDist) {
   const cx = clamp(Math.round(wx / TILE + DW / 2), 0, DW - 1);
   const cy = clamp(Math.round(wz / TILE + DH / 2), 0, DH - 1);
@@ -945,38 +1003,6 @@ function randomReachableCellNear(wx, wz, maxCellDist) {
   return arr.length ? pick(arr) : null;
 }
 
-function heroMoveToward(x, z, dt, speed) {
-  const p = hero.group.position;
-  const dx = x - p.x, dz = z - p.z;
-  const d = Math.hypot(dx, dz);
-  if (d < 0.01) return 0;
-  const step = Math.min(d, speed * dt);
-  const bx = p.x, bz = p.z;
-  moveEntity(hero, dx / d * step, dz / d * step);
-  const moved = Math.hypot(p.x - bx, p.z - bz);
-  if (moved < step * 0.25) {
-    hero.stuckT += dt;
-    if (hero.stuckT > 0.7) {
-      hero.detour = randomReachableCellNear(p.x, p.z, 5);
-      hero.stuckT = 0;
-    }
-  } else hero.stuckT = 0;
-  if (hero.detour) {
-    const dd = Math.hypot(hero.detour.x - p.x, hero.detour.z - p.z);
-    if (dd < 0.6) hero.detour = null;
-    else {
-      moveEntity(hero, (hero.detour.x - p.x) / dd * speed * dt, (hero.detour.z - p.z) / dd * speed * dt);
-    }
-  }
-  hero.group.rotation.y = Math.atan2(dx, dz);
-  return Math.hypot(x - p.x, z - p.z);
-}
-
-function faceToward(x, z) {
-  const p = hero.group.position;
-  hero.group.rotation.y = Math.atan2(x - p.x, z - p.z);
-}
-
 function heroAttack() {
   if (hero.cooldown > 0 || hero.swing >= 0) return;
   hero.swing = 0;
@@ -985,34 +1011,17 @@ function heroAttack() {
   sfx('swing');
 }
 
-function heroDecide(dt) {
-  aiDecisionT -= dt;
-  if (aiDecisionT > 0) return;
-  aiDecisionT = 0.4;
-  if (hero.hp <= 2 && hero.potions > 0) drinkPotion();
-  const foe = nearestMonster(11);
-  if (foe) { aiMode = 'fight'; aiTarget = foe; return; }
-  const loot = nearestLoot();
-  if (loot) { aiMode = 'loot'; aiTarget = loot; return; }
-  if (!hero.hasKey) {
-    // key must be somewhere — wander toward it / explore
-    aiMode = 'explore';
-    const keyPk = pickups.find(p => p.type === 'key' && !p.taken);
-    if (keyPk) { aiMode = 'loot'; aiTarget = keyPk; }
-    return;
-  }
-  if (doorMesh && !doorMesh.open) { aiMode = 'todoor'; aiTarget = doorMesh; return; }
-  aiMode = 'tostairs';
-  aiTarget = null;
-}
-
 function heroUpdate(dt, t) {
   hero.cooldown -= dt;
-  // sword swing animation + impact frame
+  // sword swing animation + emissive slash arc + impact frame
   if (hero.swing >= 0) {
     hero.swing += dt * 3.5;
     const ph = hero.swing;
     hero.armR.rotation.x = -0.9 - Math.sin(Math.min(ph, 1) * Math.PI) * 1.6;
+    if (hero.slashArc) {
+      hero.slashArc.material.opacity = Math.sin(Math.min(ph, 1) * Math.PI) * 0.85;
+      hero.slashArc.rotation.z = 1.2 - ph * 2.4;
+    }
     if (ph > 0.25 && !hero.swingHit) {
       hero.swingHit = true;
       for (const m of monsters) {
@@ -1024,72 +1033,40 @@ function heroUpdate(dt, t) {
         const diff = Math.abs((((ang - hero.group.rotation.y) % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI);
         if (diff < 1.2) {
           damageMonster(m, 1);
+          impactFlash(m.group.position.x, 0.75, m.group.position.z);
           const kb = m.group.position.clone().sub(hero.group.position).normalize().multiplyScalar(0.45);
           m.knockback = kb;
         }
       }
     }
-    if (ph >= 1.6) { hero.swing = -1; }
-  }
-
-  const controlled = performance.now() - lastInputTime < 6000;
-  if (controlled) {
-    let ix = 0, iz = 0;
-    if (keys['KeyW'] || keys['ArrowUp']) iz -= 1;
-    if (keys['KeyS'] || keys['ArrowDown']) iz += 1;
-    if (keys['KeyA'] || keys['ArrowLeft']) ix -= 1;
-    if (keys['KeyD'] || keys['ArrowRight']) ix += 1;
-    const gp = gamepadState();
-    if (gp) { ix += gp.x; iz += gp.y; if (gp.attack) heroAttack(); }
-    const mag = Math.hypot(ix, iz);
-    if (mag > 0.05) {
-      const s = 3.0 * dt;
-      moveEntity(hero, ix / mag * s, iz / mag * s);
-      hero.group.rotation.y = Math.atan2(ix, iz);
-    }
-    if (keys['Space']) heroAttack();
-  } else {
-    heroDecide(dt);
-    let tx = null, tz = null, moving = false;
-    if (aiMode === 'fight' && aiTarget && aiTarget.alive !== false) {
-      const m = aiTarget;
-      if (!m.alive) { aiTarget = null; aiDecisionT = 0; }
-      else {
-        tx = m.group.position.x; tz = m.group.position.z;
-        const d = Math.hypot(tx - hero.group.position.x, tz - hero.group.position.z);
-        if (d < (m.kind === 'boss' ? 2.0 : 1.4)) {
-          faceToward(tx, tz);
-          heroAttack();
-          tx = null;
-        }
-      }
-    } else if (aiMode === 'loot' && aiTarget) {
-      const gone = aiTarget.taken || (aiTarget.chest && aiTarget.chest.opened) ||
-                   (aiTarget.group && !aiTarget.group.parent);
-      if (gone) { aiTarget = null; aiDecisionT = 0; }
-      else { tx = aiTarget.x; tz = aiTarget.z; }
-    } else if (aiMode === 'explore') {
-      if (!hero.wanderT || hero.wanderT <= 0) {
-        hero.wanderT = rnd(2, 4);
-        hero.wander = randomReachableCellNear(hero.group.position.x, hero.group.position.z, 8);
-      }
-      hero.wanderT -= dt;
-      if (hero.wander) { tx = hero.wander.x; tz = hero.wander.z; }
-    } else if (aiMode === 'todoor' && aiTarget) {
-      if (doorMesh && doorMesh.open) { aiTarget = null; aiDecisionT = 0; }
-      else { tx = aiTarget.x; tz = aiTarget.z; }
-    } else if (aiMode === 'tostairs') {
-      tx = stairsPos.x; tz = stairsPos.z;
-    } else {
-      aiTarget = null; aiDecisionT = 0;
-    }
-    if (tx !== null) {
-      const d = heroMoveToward(tx, tz, dt, 2.4);
-      if (d < 0.5) aiDecisionT = 0;
+    if (ph >= 1.6) {
+      hero.swing = -1;
+      if (hero.slashArc) hero.slashArc.material.opacity = 0;
     }
   }
 
-  // walk cycle + torch sway
+  // manual controls only — no auto-AI, no self-play, ever
+  let ix = 0, iz = 0;
+  if (keys['KeyW'] || keys['ArrowUp']) iz -= 1;
+  if (keys['KeyS'] || keys['ArrowDown']) iz += 1;
+  if (keys['KeyA'] || keys['ArrowLeft']) ix -= 1;
+  if (keys['KeyD'] || keys['ArrowRight']) ix += 1;
+  const gp = gamepadState();
+  if (gp) { ix += gp.x; iz += gp.y; if (gp.attack) heroAttack(); }
+  const mag = Math.hypot(ix, iz);
+  if (mag > 0.05) {
+    const s = 3.0 * dt;
+    moveEntity(hero, ix / mag * s, iz / mag * s);
+    hero.group.rotation.y = Math.atan2(ix, iz);
+  }
+  if (keys['Space']) heroAttack();
+
+  // damage flinch — visible lean when hurt
+  if (hero.flinchT > 0) hero.flinchT = Math.max(0, hero.flinchT - dt);
+  const flinch = hero.flinchT > 0 ? hero.flinchT / 0.28 : 0;
+  if (hero.torso) hero.torso.rotation.x = -flinch * 0.45;
+
+  // walk cycle + torch sway (torch arm stays raised)
   const walked = hero.group.position.distanceTo(hero._lastPos ? hero._lastPos : new THREE.Vector3(1e9, 0, 0));
   if (!hero._lastPos) hero._lastPos = hero.group.position.clone();
   else hero._lastPos.set(hero.group.position.x, 0, hero.group.position.z);
@@ -1098,7 +1075,7 @@ function heroUpdate(dt, t) {
   const sw = Math.sin(hero.walkPhase) * (hero.walking ? 0.55 : 0.05);
   hero.legL.rotation.x = sw; hero.legR.rotation.x = -sw;
   if (hero.swing < 0) hero.armR.rotation.x = -sw * 0.5;
-  hero.armL.rotation.x = sw * 0.5;
+  hero.armL.rotation.x = -1.0 + sw * 0.3;
   hero.armL.rotation.z = Math.sin(hero.walkPhase * 0.5) * 0.07;
 
   // descend check
@@ -1130,6 +1107,7 @@ function damageHero(dmg, fromX, fromZ) {
   hero.hp -= dmg;
   hero.hurtTimer = 0.55;
   hero.flash = 0.2;
+  hero.flinchT = 0.28;
   sfx('hurt');
   const kb = new THREE.Vector3(hero.group.position.x - fromX, 0, hero.group.position.z - fromZ).normalize().multiplyScalar(0.5);
   moveEntity(hero, kb.x, kb.z);
@@ -1144,7 +1122,7 @@ function damageHero(dmg, fromX, fromZ) {
 function monsterUpdate(m, dt, t) {
   if (m.dead) {
     m.deathT += dt;
-    const s = Math.max(0.001, 1 - m.deathT * 2.4) * (m.boss ? 1.8 : 1);
+    const s = Math.max(0.001, 1 - m.deathT * 2.4) * (m.boss ? 2.05 : 1);
     m.group.scale.setScalar(s);
     if (m.deathT > 0.45) levelGroup.remove(m.group);
     return;
@@ -1153,9 +1131,9 @@ function monsterUpdate(m, dt, t) {
   if (m.flash > 0) {
     m.flash -= dt;
     const pulse = 1 + Math.max(0, m.flash) * 1.2;
-    m.group.scale.setScalar((m.boss ? 1.8 : 1) * pulse);
-  } else if (m.group.scale.x !== (m.boss ? 1.8 : 1)) {
-    m.group.scale.setScalar(m.boss ? 1.8 : 1);
+    m.group.scale.setScalar((m.boss ? 2.05 : 1) * pulse);
+  } else if (m.group.scale.x !== (m.boss ? 2.05 : 1)) {
+    m.group.scale.setScalar(m.boss ? 2.05 : 1);
   }
 
   const p = hero.group.position, mp = m.group.position;
@@ -1202,6 +1180,39 @@ function monsterUpdate(m, dt, t) {
 }
 
 // ============================== PICKUPS & DOOR ==============================
+function openChest(pk) {
+  const c = pk.chest;
+  if (c && !c.opened) {
+    c.opened = true;
+    c.lid.rotation.x = -1.25;
+    c.lid.position.z = -0.22;
+    sfx('pickup');
+    for (let i = 0; i < rndi(2, 3); i++) spawnPickup('gold', c.group.position.x + rnd(-0.5, 0.5), c.group.position.z + rnd(-0.5, 0.5));
+    if (Math.random() < 0.5) spawnPickup('potion', c.group.position.x + rnd(-0.4, 0.4), c.group.position.z + rnd(-0.4, 0.4));
+  }
+  if (c) pk.taken = true;
+}
+function openDoor() {
+  if (!doorMesh || doorMesh.open) return;
+  doorMesh.open = true;
+  sfx('door');
+  doorMesh.hasp.visible = false;
+  doorMesh.lockGlow.visible = false;
+  doorMesh.panel.rotation.y = -1.35;
+  doorMesh.panel.position.x = -0.55;
+  const idx = propBlocks.findIndex(b => Math.abs(b.x - doorMesh.x) < 0.01 && Math.abs(b.z - doorMesh.z) < 0.01);
+  if (idx >= 0) propBlocks.splice(idx, 1);
+}
+// E: interact — open a chest you stand next to, unlock the door with the key
+function tryInteract() {
+  const p = hero.group.position;
+  for (const pk of pickups) {
+    if (pk.taken || pk.type !== 'chest') continue;
+    const c = pk.chest;
+    if (c && !c.opened && Math.hypot(c.group.position.x - p.x, c.group.position.z - p.z) < 1.4) { openChest(pk); return; }
+  }
+  if (doorMesh && !doorMesh.open && hero.hasKey && Math.hypot(doorMesh.x - p.x, doorMesh.z - p.z) < 1.8) openDoor();
+}
 function updatePickups(dt, t) {
   const p = hero.group.position;
   for (const pk of pickups) {
@@ -1213,16 +1224,7 @@ function updatePickups(dt, t) {
     const d = Math.hypot(pk.x - p.x, pk.z - p.z);
     if (d < 0.85) {
       if (pk.type === 'chest') {
-        const c = pk.chest;
-        if (c && !c.opened) {
-          c.opened = true;
-          c.lid.rotation.x = -1.25;
-          c.lid.position.z = -0.22;
-          sfx('pickup');
-          for (let i = 0; i < rndi(2, 3); i++) spawnPickup('gold', c.group.position.x + rnd(-0.5, 0.5), c.group.position.z + rnd(-0.5, 0.5));
-          if (Math.random() < 0.5) spawnPickup('potion', c.group.position.x + rnd(-0.4, 0.4), c.group.position.z + rnd(-0.4, 0.4));
-        }
-        if (c) pk.taken = true;
+        openChest(pk);
       } else {
         pk.taken = true;
         if (pk.group) levelGroup.remove(pk.group);
@@ -1236,16 +1238,7 @@ function updatePickups(dt, t) {
   }
   if (doorMesh && !doorMesh.open && hero.hasKey) {
     const d = Math.hypot(doorMesh.x - p.x, doorMesh.z - p.z);
-    if (d < 1.7) {
-      doorMesh.open = true;
-      sfx('door');
-      doorMesh.hasp.visible = false;
-      doorMesh.lockGlow.visible = false;
-      doorMesh.panel.rotation.y = -1.35;
-      doorMesh.panel.position.x = -0.55;
-      const idx = propBlocks.findIndex(b => Math.abs(b.x - doorMesh.x) < 0.01 && Math.abs(b.z - doorMesh.z) < 0.01);
-      if (idx >= 0) propBlocks.splice(idx, 1);
-    }
+    if (d < 1.7) openDoor();
   }
 }
 
@@ -1329,9 +1322,9 @@ const postMat = new THREE.ShaderMaterial({
       col += (b - 0.5) * (2.4 / 255.0);
       col = floor(col * 255.0) / 255.0;
 
-      // vignette
+      // vignette (kept subtle so shadows stay deep but details stay readable)
       vec2 q = vUv - 0.5;
-      col *= 1.0 - dot(q, q) * 0.85;
+      col *= 1.0 - dot(q, q) * 0.55;
 
       // film grain
       col += (hash21(vUv * uRes + fract(uTime) * 137.0) - 0.5) * 0.035;
@@ -1359,7 +1352,9 @@ window.addEventListener('resize', () => {
 // ============================== DEBUG HANDLE ==============================
 window.__tl = {
   ready: true,
+  gameStarted: () => gameStarted,
   monsters: () => monsters.filter(m => m.alive).length,
+  monstersAt: () => monsters.filter(m => m.alive).map(m => ({ x: m.group.position.x, z: m.group.position.z, kind: m.kind })),
   slain: () => hero.slain,
   gold: () => hero.gold,
   hp: () => hero.hp,
@@ -1367,6 +1362,8 @@ window.__tl = {
   depth: () => hero.depth,
   hasKey: () => hero.hasKey,
   player: { get x() { return hero.group.position.x; }, get z() { return hero.group.position.z; } },
+  // post-processing chain evidence for the visual gates
+  post: { rtScale: RT_SCALE, ditherAmp: 2.4 / 255, tiltShift: true },
 };
 
 // ============================== MAIN LOOP ==============================
@@ -1392,7 +1389,8 @@ function animate() {
       startLevel(hero.depth);
     }
     if (descending <= 0) { descendedFlag = false; fade.style.opacity = '0'; }
-  } else {
+  } else if (gameStarted) {
+    // gameplay runs ONLY after the start interaction — never idle, never self-play
     heroUpdate(dt, t);
     for (let i = monsters.length - 1; i >= 0; i--) {
       const m = monsters[i];
@@ -1400,7 +1398,7 @@ function animate() {
       if (m.dead && m.deathT > 0.5) monsters.splice(i, 1);
     }
     updatePickups(dt, t);
-    // trickle respawn — monsters are always present and active
+    // trickle respawn — monsters are always present and active during play
     trickleT -= dt;
     if (trickleT <= 0) {
       trickleT = 6;
@@ -1409,6 +1407,35 @@ function animate() {
         if (c) spawnMonster(pick(MON_KINDS), c.x, c.y);
       }
     }
+  } else {
+    // pre-start: gamepad input may begin the game, nothing else moves
+    if (anyGamepadInput()) startGame();
+  }
+
+  // hit flashes
+  for (let i = hitFlashes.length - 1; i >= 0; i--) {
+    const f = hitFlashes[i];
+    f.t += dt;
+    if (f.t >= 0.14 || !f.mesh.parent) {
+      if (f.mesh.parent) levelGroup.remove(f.mesh);
+      hitFlashes.splice(i, 1);
+      continue;
+    }
+    const k = f.t / 0.14;
+    f.mesh.scale.setScalar(0.5 + k * 1.8);
+    f.mesh.material.opacity = 0.95 * (1 - k);
+  }
+
+  // puddles wobble the firelight (specular-ish shimmer)
+  for (const pd of puddleMeshes) {
+    const wob = 0.5 + 0.5 * Math.sin(t * 2.1 + pd.phase);
+    pd.mesh.material.shininess = 80 + wob * 60;
+    pd.mesh.material.emissive.setRGB(0.16 * wob, 0.085 * wob, 0.035 * wob);
+  }
+
+  // banners + cobwebs sway subtly
+  for (const swm of swayables) {
+    swm.rotation.z = Math.sin(t * 1.3 + swm.userData.swayPhase) * (swm.userData.swayAmp || 0.05);
   }
 
   // debris physics
@@ -1468,12 +1495,12 @@ function animate() {
   dustGeo.attributes.position.needsUpdate = true;
 
   // torch flicker + lights follow the hero
-  const flick = 1.9 + Math.sin(t * 11) * 0.18 + Math.sin(t * 23.7) * 0.12 + Math.sin(t * 5.3) * 0.1;
+  const flick = 3.4 + Math.sin(t * 11) * 0.36 + Math.sin(t * 23.7) * 0.24 + Math.sin(t * 5.3) * 0.2;
   torchLight.intensity = flick;
   torchLight.position.set(hero.group.position.x, 1.25, hero.group.position.z + 0.25);
   torchSpot.position.set(hero.group.position.x + 1.5, 6.5, hero.group.position.z + 2.5);
   torchSpot.target.position.copy(hero.group.position);
-  torchSpot.intensity = 1.45 + Math.sin(t * 9.1) * 0.12;
+  torchSpot.intensity = 2.35 + Math.sin(t * 9.1) * 0.18;
   if (hero.torchFlameMesh) hero.torchFlameMesh.scale.setScalar(0.85 + Math.sin(t * 13) * 0.15 + Math.cos(t * 29) * 0.06);
   hero.flash = Math.max(0, hero.flash - dt);
   hero.hurtTimer = Math.max(0, hero.hurtTimer - dt);
@@ -1482,7 +1509,7 @@ function animate() {
   // sconce flicker
   for (const g of torchGroups) {
     if (g.userData.light) {
-      g.userData.light.intensity = (g.userData.light.distance > 8 ? 1.05 : 0.75) + Math.sin(t * 10 + g.position.x) * 0.14;
+      g.userData.light.intensity = (g.userData.light.distance > 10 ? 1.8 : 1.25) + Math.sin(t * 10 + g.position.x) * 0.17;
       const fl = g.userData.flame;
       if (fl) fl.scale.y = 1 + Math.sin(t * 12 + g.position.z) * 0.2;
     }
