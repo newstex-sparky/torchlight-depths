@@ -4,10 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TORCHLIGHT DEPTHS</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
   html,body { margin:0; height:100%; overflow:hidden; background:#0a0b10; }
   #canvas { display:block; width:100%; height:100% }
-  .hud { position:fixed; top:10px; left:10px; color:#e8d8c8; pointer-events:none; font-size:13px; z-index:100; }
+  .hud { position:fixed; top:10px; left:10px; color:#e8d8c8; pointer-events:none; font-family: 'Press Start 2P', monospace; font-size:13px; z-index:100; }
   .hud .header { font-weight:bold; margin-bottom:6px; padding-bottom:4px; border-bottom:1px solid #3a4250; }
   .hud .row { margin:4px 0; }
   .hud .heart { display:inline-block; width:18px; height:16px; background:#b53a2c; margin-right:2px; clip-path:polygon(30% 0%, 70% 0%, 100% 50%, 70% 100%, 30% 100%, 0% 50%); vertical-align:middle; }
@@ -24,21 +25,20 @@
   <div class="row"><span class="heart"></span><span id="hp">5</span> / <span id="maxHp">5</span> HP</div>
   <div class="row">Gold: <span id="gold">0</span> <span class="gold">|</span> Depth: <span id="depth">L1</span></div>
   <div class="row">Monsters slain: <span id="monsters">0</span></div>
+  <div class="row" id="potionHud" style="display:none; margin-top: 4px; padding-top: 4px; border-top: 1px solid #3a4250;"><span id="potionIcon" style="display:inline-block; width:16px; height:16; background:#ffd700; margin-right:2px; vertical-align:middle;"></span><span id="potionType" style="color:#ffd479; margin-left:4px;">None</span> <span style="color:#6a6a6a; font-size:10px; margin-left:4px;">press Q to drink</span></div>
 </div>
 <div id="soundHint">click for sound</div>
 
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.module.js"
+  }
+}
+</script>
+
 <script type="module">
 import * as THREE from 'three';
-
-// ==== Importmap ====
-if (!window.THREE_IMPORT_MAP) {
-  window.THREE_IMPORT_MAP = {
-    imports: {
-      three: 'https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.module.js',
-      'three/addons/': 'https://cdn.jsdelivr.net/npm/three@0.152.0/examples/jsm/'
-    }
-  };
-}
 
 // ==== Core Three.js setup ====
 const canvas = document.getElementById('canvas');
@@ -113,7 +113,11 @@ const player = {
   velocity: new THREE.Vector3(0, 0, 0),
   swayAngle: 0,
   walkPhase: 0,
-  invincible: 0
+  invincible: 0,
+  hasKey: false,
+  potionType: null,
+  potionCharges: 0,
+  hasKey: false
 };
 
 // Player body (cloak + armor)
@@ -283,7 +287,220 @@ function generateDungeon() {
     }
   }
 
-  // Crates
+  // Moss patches on floor (10% of floors, clustered)
+  const mossCount = Math.max(1, Math.floor(floorCells.length / 10));
+  for (let i = 0; i < mossCount; i++) {
+    const mx = Math.floor(Math.random() * DW);
+    const my = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === mx && c[1] === my)) {
+      const group = new THREE.Group();
+      const moss = new THREE.Mesh(
+        new THREE.PlaneGeometry(TILE * 0.6, TILE * 0.6),
+        new THREE.MeshLambertMaterial({ color: 0x5a6b5a, transparent: true, opacity: 0.4 })
+      );
+      moss.position.y = 0.02;
+      moss.rotation.x = -Math.PI / 2;
+      group.add(moss);
+      const detail = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 6, 6),
+        new THREE.MeshLambertMaterial({ color: 0x7a8a7a })
+      );
+      detail.position.y = 0.1;
+      group.add(detail);
+      props.push({ type: "moss", x: mx, y: my, group });
+    }
+  }
+
+  // Flagstone cracks (small fissures in the floor)
+  const crackCount = Math.max(1, Math.floor(floorCells.length / 20));
+  const crackIndices = new Set();
+  while (crackIndices.size < crackCount) {
+    const ci = Math.floor(Math.random() * floorCells.length);
+    crackIndices.add(ci);
+  }
+  let crackIdx = 0;
+  floorCells.forEach(([x, y], i) => {
+    if (crackIndices.has(i)) {
+      const group = new THREE.Group();
+      const crack = new THREE.Mesh(
+        new THREE.BoxGeometry(TILE * 0.95, 0.05, TILE * 0.95),
+        new THREE.MeshLambertMaterial({ color: 0x3a2a2a })
+      );
+      crack.position.y = -0.01;
+      group.add(crack);
+      // Broken pieces
+      for (let j = 0; j < 3; j++) {
+        const piece = new THREE.Mesh(
+          new THREE.BoxGeometry(TILE * 0.2, 0.05, TILE * 0.2),
+          new THREE.MeshLambertMaterial({ color: 0x251a1a })
+        );
+        piece.position.set(
+          (Math.random() - 0.5) * TILE * 0.4,
+          0.0,
+          (Math.random() - 0.5) * TILE * 0.4
+        );
+        group.add(piece);
+      }
+      group.position.set(x, 0, y);
+      props.push({ type: "crack", x: x, y: y, group });
+    }
+  });
+
+  
+  // Rubble (broken stone pieces around walls and corners)
+  const rubbleCount = 8;
+  for (let i = 0; i < rubbleCount; i++) {
+    const rx = Math.floor(Math.random() * DW);
+    const ry = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === rx && c[1] === ry)) {
+      const group = new THREE.Group();
+      const largePiece = new THREE.Mesh(
+        new THREE.BoxGeometry(TILE * 0.6, 0.3, TILE * 0.6, 6, 6, 6),
+        new THREE.MeshLambertMaterial({ color: 0x4a3a2a })
+      );
+      largePiece.position.y = 0.15;
+      group.add(largePiece);
+      for (let j = 0; j < 2; j++) {
+        const fragment = new THREE.Mesh(
+          new THREE.BoxGeometry(TILE * 0.25, 0.15, TILE * 0.25, 4, 4, 4),
+          new THREE.MeshLambertMaterial({ color: 0x3a2a2a })
+        );
+        fragment.position.set(
+          (Math.random() - 0.5) * TILE * 0.3,
+          0.1,
+          (Math.random() - 0.5) * TILE * 0.3
+        );
+        group.add(fragment);
+      }
+      group.position.set(rx, 0, ry);
+      props.push({ type: 'rubble', x: rx, y: ry, group });
+    }
+  }
+
+
+  // Barred cells (cage structures)
+  const barredCellCount = 2;
+  for (let i = 0; i < barredCellCount; i++) {
+    const bx = Math.floor(Math.random() * (DW - 4)) + 2;
+    const by = Math.floor(Math.random() * (DH - 4)) + 2;
+    if (floorCells.some(c => c[0] === bx && c[1] === by)) {
+      const group = new THREE.Group();
+      // Floor
+      const floor = new THREE.Mesh(
+        new THREE.BoxGeometry(TILE * 0.9, TILE * 0.1, TILE * 0.9),
+        new THREE.MeshLambertMaterial({ color: 0x5a5a6e })
+      );
+      floor.position.y = 0.02;
+      group.add(floor);
+      // Bars (4 vertical bars + 4 horizontal bars)
+      for (let j = 0; j < 4; j++) {
+        const vertical = new THREE.Mesh(
+          new THREE.BoxGeometry(0.08, 0.8, TILE * 0.9, 4, 4, 1),
+          new THREE.MeshLambertMaterial({ color: 0x6b5b5b })
+        );
+        vertical.position.set(
+          (j % 2 === 0 ? -TILE * 0.4 : TILE * 0.4),
+          0.4,
+          (j < 2 ? -TILE * 0.4 : TILE * 0.4)
+        );
+        group.add(vertical);
+        const horizontal = new THREE.Mesh(
+          new THREE.BoxGeometry(TILE * 0.9, 0.08, 0.08, 4, 4, 1),
+          new THREE.MeshLambertMaterial({ color: 0x6b5b5b })
+        );
+        horizontal.position.set(
+          (j < 2 ? -TILE * 0.4 : TILE * 0.4),
+          0.4,
+          (j % 2 === 0 ? -TILE * 0.4 : TILE * 0.4)
+        );
+        group.add(horizontal);
+      }
+      group.position.set(bx, 0, by);
+      props.push({ type: 'barredCell', x: bx, y: by, group });
+    }
+  }
+
+
+  // Wooden doors (some locked, some open)
+  const doorCount = 3;
+  for (let i = 0; i < doorCount; i++) {
+    const dx = Math.floor(Math.random() * (DW - 4)) + 2;
+    const dy = Math.floor(Math.random() * (DH - 4)) + 2;
+    if (floorCells.some(c => c[0] === dx && c[1] === dy)) {
+      const group = new THREE.Group();
+      // Door frame
+      const frame = new THREE.Mesh(
+        new THREE.BoxGeometry(TILE * 0.95, 1.2, 0.1, 6, 6, 1),
+        new THREE.MeshLambertMaterial({ color: 0x5a4a30 })
+      );
+      frame.position.y = 0.6;
+      group.add(frame);
+      // Door panels (vertical planks)
+      for (let j = 0; j < 3; j++) {
+        const panel = new THREE.Mesh(
+          new THREE.BoxGeometry(TILE * 0.3, 1.0, 0.05, 6, 6, 1),
+          new THREE.MeshLambertMaterial({ color: 0x8b5a2b })
+        );
+        panel.position.set(0, 0.5, (j - 1) * TILE * 0.35);
+        panel.rotation.y = (j % 2 === 0) ? Math.PI / 2 : 0;
+        group.add(panel);
+      }
+      // Lock hasp (on some doors)
+      if (i === 0) {
+        const hasp = new THREE.Mesh(
+          new THREE.BoxGeometry(0.08, 0.3, 0.04, 6, 6, 1),
+          new THREE.MeshLambertMaterial({ color: 0x999999 })
+        );
+        hasp.position.set(0, 0.25, TILE * 0.42);
+        hasp.rotation.x = Math.PI / 2;
+        group.add(hasp);
+      }
+      group.position.set(dx, 0, dy);
+      props.push({ type: 'woodenDoor', x: dx, y: dy, group, locked: true });
+    }
+  }
+
+  // Key spawn (one key per level)
+  {
+    const keyX = Math.floor(Math.random() * DW);
+    const keyY = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === keyX && c[1] === keyY)) {
+      const keyGroup = new THREE.Group();
+      // Key bowl
+      const keyBowl = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.15, 0.2, 0.3, 8, 8),
+        new THREE.MeshLambertMaterial({ color: 0xc8a500 })
+      );
+      keyBowl.position.y = 0.15;
+      keyGroup.add(keyBowl);
+      // Key teeth
+      for (let i = 0; i < 4; i++) {
+        const tooth = new THREE.Mesh(
+          new THREE.BoxGeometry(0.08, 0.15, 0.3, 4, 4, 1),
+          new THREE.MeshLambertMaterial({ color: 0x8b6a1b })
+        );
+        tooth.position.set(
+          Math.sin(i * Math.PI / 2) * 0.18,
+          0.2 + Math.cos(i * Math.PI / 2) * 0.05,
+          (i % 2 === 0 ? -0.2 : 0.2)
+        );
+        keyGroup.add(tooth);
+      }
+      // Ring
+      const keyRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.25, 0.08, 8, 24, Math.PI),
+        new THREE.MeshLambertMaterial({ color: 0xc8a500 })
+      );
+      keyRing.position.y = 0.3;
+      keyRing.rotation.x = Math.PI / 2;
+      keyGroup.add(keyRing);
+      keyGroup.position.set(keyX, 0, keyY);
+      scene.add(keyGroup);
+      props.push({ type: 'key', x: keyX, y: keyY, group: keyGroup });
+    }
+  }
+
+// Crates
   for (let i = 0; i < 10; i++) {
     const cx = Math.floor(Math.random() * DW);
     const cy = Math.floor(Math.random() * DH);
@@ -451,7 +668,29 @@ function generateDungeon() {
       khole.position.set(0, TILE * 0.15, 0.2);
       khole.rotation.x = Math.PI / 2;
       group.add(khole);
-      props.push({ type: 'chest', x: cx, y: cy, group });
+      // Potion (random type inside)
+      const potionTypes = ['health', 'strength', 'speed'];
+      const hasPotion = Math.random() < 0.5;
+      if (hasPotion) {
+        const potionType = potionTypes[Math.floor(Math.random() * potionTypes.length)];
+        // Potion bottle
+        const bottle = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.1, 0.2, 0.8, 8, 8),
+          new THREE.MeshLambertMaterial({ color: 0xff0000 })
+        );
+        bottle.position.y = TILE * 0.25;
+        group.add(bottle);
+        // Potion liquid
+        const liquid = new THREE.Mesh(
+          new THREE.SphereGeometry(0.15, 8, 8),
+          new THREE.MeshLambertMaterial({ color: potionType === 'health' ? 0xff0000 : potionType === 'strength' ? 0x00ff00 : 0x0000ff })
+        );
+        liquid.position.y = TILE * 0.35;
+        group.add(liquid);
+        props.push({ type: 'chest', x: cx, y: cy, group, potionType: potionType });
+      } else {
+        props.push({ type: 'chest', x: cx, y: cy, group });
+      }
     }
   }
 
@@ -522,6 +761,32 @@ function generateDungeon() {
       blade.userData = { swingPhase: 0, swingSpeed: Math.random() * 0.03 + 0.01 };
       group.add(blade);
       props.push({ type: 'swingBlade', x: bx, y: by, group });
+    }
+  }
+
+  // Puddles reflecting firelight
+  const puddleCount = 3;
+  for (let i = 0; i < puddleCount; i++) {
+    const px = Math.floor(Math.random() * DW);
+    const py = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === px && c[1] === py)) {
+      const group = new THREE.Group();
+      const water = new THREE.Mesh(
+        new THREE.PlaneGeometry(TILE * 0.8, TILE * 0.8),
+        new THREE.MeshBasicMaterial({ color: 0x1a1a3a, transparent: true, opacity: 0.7, side: THREE.DoubleSide })
+      );
+      water.position.y = 0.03;
+      water.rotation.x = -Math.PI / 2;
+      group.add(water);
+      // Reflection hint - slight white offset
+      const reflection = new THREE.Mesh(
+        new THREE.PlaneGeometry(TILE * 0.78, TILE * 0.78),
+        new THREE.MeshBasicMaterial({ color: 0x2a2a4a, transparent: true, opacity: 0.3, side: THREE.DoubleSide })
+      );
+      reflection.position.y = 0.04;
+      reflection.rotation.x = -Math.PI / 2;
+      group.add(reflection);
+      props.push({ type: 'puddle', x: px, y: py, group });
     }
   }
 
@@ -672,13 +937,71 @@ class Monster {
 
   monsterSlain() {
     this.group.visible = false;
-    // Transform based on type
+    // Death FX based on type
     if (this.type === 'skeleton') {
-      // Becomes bones - already hidden, just count
+      // Collapse into bone pile
+      if (!this.collapse) {
+        this.collapse = true;
+        // Create bone pile meshes
+        const bonePieces = [
+          new THREE.SphereGeometry(0.1, 6, 6),
+          new THREE.CylinderGeometry(0.08, 0.12, 0.6, 6, 1)
+        ];
+        const colors = [0x9e9e9e, 0x9e9e9e];
+        const positions = [[0, 0.02, 0], [0, 0.25, 0], [0, 0.18, 0.25]];
+        for (let i = 0; i < bonePieces.length; i++) {
+          const bone = new THREE.Mesh(bonePieces[i], new THREE.MeshLambertMaterial({ color: colors[i] }));
+          bone.position.set(positions[i][0], positions[i][1] + Math.random() * 0.1, positions[i][2] + Math.random() * 0.1);
+          bone.userData.fadeTime = 120 + Math.random() * 60; // fade over 2-3 seconds
+          this.group.add(bone); // temporarily add to scene for fade
+        }
+        // Remove after fade
+        setTimeout(() => {
+          this.group.visible = true; // show temporarily for fade
+          // Note: actual fade would need post-processing, simplified here
+        }, 180);
+      }
     } else if (this.type === 'rat') {
-      // Burst into goo particles (simplified: just disappear)
+      // Burst into goo particles
+      if (!this.gooSpawned) {
+        this.gooSpawned = true;
+        // Create splatter meshes
+        for (let i = 0; i < 8; i++) {
+          const splatGeo = new THREE.BoxGeometry(0.15 + Math.random() * 0.2, 0.02, 0.15 + Math.random() * 0.2);
+          const splat = new THREE.Mesh(splatGeo, new THREE.MeshBasicMaterial({ color: 0xffd700, transparent: true, opacity: 0.8 }));
+          const angle = (i / 8) * Math.PI * 2;
+          const distance = 0.3 + Math.random() * 0.2;
+          splat.position.set(Math.cos(angle) * distance, 0.02, Math.sin(angle) * distance);
+          splat.userData.fadeTime = 100 + Math.random() * 50;
+          this.group.add(splat);
+        }
+        setTimeout(() => {
+          this.group.visible = true;
+        }, 150);
+      }
     } else if (this.type === 'slime') {
-      // Burst into goo - disappear
+      // Burst into goo - spawn debris that fades
+      if (!this.gooSpawned) {
+        this.gooSpawned = true;
+        // Create goo debris particles
+        for (let i = 0; i < 12; i++) {
+          const debrisGeo = new THREE.SphereGeometry(0.05 + Math.random() * 0.1, 6, 6);
+          const debris = new THREE.Mesh(debrisGeo, new THREE.MeshBasicMaterial({ color: 0x00a000, transparent: true, opacity: 0.9 }));
+          const angle = (i / 12) * Math.PI * 2;
+          const distance = 0.2 + Math.random() * 0.3;
+          debris.position.set(Math.cos(angle) * distance, 0.02 + Math.random() * 0.1, Math.sin(angle) * distance);
+          debris.userData.fadeTime = 80 + Math.random() * 40;
+          debris.userData.velocity = new THREE.Vector3(
+            (Math.random() - 0.5) * 0.1,
+            0.1 + Math.random() * 0.1,
+            (Math.random() - 0.5) * 0.1
+          );
+          this.group.add(debris);
+        }
+        setTimeout(() => {
+          this.group.visible = true;
+        }, 100);
+      }
     }
     dungeon.monstersSlain = (dungeon.monstersSlain || 0) + 1;
     document.getElementById('monsters').textContent = `Monsters slain: ${dungeon.monstersSlain}`;
@@ -1014,14 +1337,16 @@ function buildDungeonMeshes() {
   // Add all prop groups
   props.forEach(p => {
     if (p.type === 'barrel' || p.type === 'crate' || p.type === 'pillar' || 
-        p.type === 'stairs' || p.type === 'bone' || p.type === 'cobweb' ||
-        p.type === 'chest' || p.type === 'banner' || p.type === 'spikePlate' ||
-        p.type === 'swingBlade') {
-      // Position the prop group at its grid coordinates
-      p.group.position.set(p.x, 0, p.y);
-      scene.add(p.group);
-    }
-    // Rune and moonlight props already added to scene in generateDungeon
+            p.type === 'stairs' || p.type === 'bone' || p.type === 'cobweb' ||  
+            p.type === 'chest' || p.type === 'banner' || p.type === 'spikePlate' ||   
+            p.type === 'swingBlade' || p.type === 'moss' || p.type === 'crack' || 
+            p.type === 'puddle' || p.type === 'rubble' || p.type === 'barredCell' ||
+            p.type === 'woodenDoor') {
+          // Position the prop group at its grid coordinates
+          p.group.position.set(p.x, 0, p.y);
+          scene.add(p.group);
+        }
+        // Rune and moonlight props already added to scene in generateDungeon
   });
   
   // Ensure rune and moonlight groups are positioned
@@ -1188,6 +1513,18 @@ function gameLoop(now) {
   // Update monster AI
   updateMonsters(dt);
   
+  // Auto-drink potion when HP is low (AI)
+  if (player.potionType === "health" && player.potionCharges > 0 && player.hp <= player.maxHp * 0.5) {
+    player.potionCharges--;
+    player.hp = Math.min(player.maxHp, player.hp + 2);
+    document.getElementById("soundHint").textContent = "auto-drank health potion";
+    // Update HUD
+    if (player.potionCharges <= 0) {
+      player.potionType = null;
+      document.getElementById("potionType").textContent = "None";
+      document.getElementById("potionIcon").style.display = "none";
+    }
+  }
   // Attack cooldown
   if (player.attackCooldown > 0) {
     player.attackCooldown -= dt;
@@ -1259,7 +1596,347 @@ function gameLoop(now) {
   }
   
   // Request next frame
-  requestAnimationFrame(gameLoop);
+  
+// Level descent function
+function descendLevel() {
+  player.level++;
+  document.getElementById('depth').textContent = 'L' + player.level;
+  
+  // Spawn boss every third level
+  if (player.level % 3 === 0) {
+    spawnBoss();
+  }
+  
+  // Generate new dungeon at deeper level
+  generateNewDungeon();
+  
+  // Reset player position and state
+  player.group.position.set(0, 0, 0);
+  player.hp = player.maxHp;
+  updateHUD();
+  
+  // Remove old monsters
+  for (let i = monsters.length - 1; i >= 0; i--) {
+    if (monsters[i].group) {
+      monsters[i].group.visible = false;
+      scene.remove(monsters[i].group);
+    }
+  }
+  monsters.length = 0;
+  
+  // Reset key
+  player.hasKey = false;
+  if (keyGroup && keyGroup.visible) {
+    keyGroup.visible = false;
+  }
+  
+  // Update HUD
+  document.getElementById('monsters').textContent = 'Monsters slain: 0';
+  
+  // Show hint
+  document.getElementById('soundHint').textContent = 'new level - find key';
+}
+
+function spawnBoss(x, y) {
+  // Create a boss monster - larger and tougher for boss levels
+  const bossType = "skeleton";
+  const boss = new Monster(bossType, x, y);
+  boss.boss = true;
+  boss.maxHp = player.level * 4 + 8;
+  boss.hp = boss.maxHp;
+  // Visual: larger size
+  boss.group.scale.set(2, 2, 2);
+  // Visual: glowing red eyes
+  if (boss.leftEye) boss.leftEye.material.color.setHex(0xff0000);
+  if (boss.rightEye) boss.rightEye.material.color.setHex(0xff0000);
+  // Add crown indicator
+  const crown = new THREE.Mesh(
+    new THREE.BoxGeometry(0.5, 0.1, 0.5, 4, 4, 1),
+    new THREE.MeshLambertMaterial({ color: 0xffd700 })
+  );
+  crown.position.y = 2.2;
+  crown.rotation.x = -Math.PI / 2;
+  boss.group.add(crown);
+  // Increased damage
+  boss.damage = 3;
+  // Boss has more health and deals more damage
+  boss.healthBar = {
+    max: boss.maxHp,
+    current: boss.hp
+  };
+  // Special attack: fireball
+  boss.fireballCooldown = 0;
+  // Spawn fireballs at player
+  boss.spawnFireball = function() {
+    const fbGeo = new THREE.SphereGeometry(0.3, 12, 12);
+    const fbMat = new THREE.MeshLambertMaterial({ color: 0xff6600 });
+    const fireball = new THREE.Mesh(fbGeo, fbMat);
+    const dx = player.group.position.x - boss.x;
+    const dz = player.group.position.z - boss.y;
+    fireball.position.set(boss.x, 0.5, boss.y);
+    scene.add(fireball);
+    // Animate toward player
+    const start = performance.now();
+    function animateFB() {
+      const elapsed = performance.now() - start;
+      const progress = Math.min(elapsed / 500, 1);
+      fireball.position.x = THREE.MathUtils.lerp(boss.x, player.group.position.x, progress);
+      fireball.position.z = THREE.MathUtils.lerp(boss.y, player.group.position.z, progress);
+      fireball.scale.multiplyScalar(1 - progress);
+      if (progress < 1) {
+        requestAnimationFrame(animateFB);
+      } else {
+        scene.remove(fireball);
+      }
+    }
+    requestAnimationFrame(animateFB);
+  };
+  // Add fireball spawn timer
+  boss.fireballTimer = 0;
+  return boss;
+}
+
+function generateNewDungeon() {
+  // Reset dungeon data
+  floorCells.length = 0;
+  wallCells.length = 0;
+  props.length = 0;
+  monsterSpawns.length = 0;
+  
+  // Reset player stats
+  player.hp = player.maxHp;
+  player.gold = 0;
+  player.monstersSlain = 0;
+  player.hasKey = false;
+  
+  // Increase monster toughness for deeper levels
+  const monsterMultiplier = player.level * 0.5 + 0.5;
+  
+  // Re-generate room-and-corridor dungeon
+  for (let y = 0; y < DH; y++) {
+    for (let x = 0; x < DW; x++) {
+      floorCells.push([x, y]);
+    }
+  }
+  
+  // Carve out rooms
+  const rooms = [];
+  for (let i = 0; i < 8; i++) {
+    const w = 3 + Math.floor(Math.random() * 6);
+    const h = 2 + Math.floor(Math.random() * 4);
+    const rx = 1 + Math.floor(Math.random() * (DW - w - 1));
+    const ry = 1 + Math.floor(Math.random() * (DH - h - 1));
+    rooms.push({ x: rx, y: ry, w, h });
+  }
+  
+  // Mark wall cells
+  for (let y = 0; y < DH; y++) {
+    for (let x = 0; x < DW; x++) {
+      const isFloor = floorCells.some(c => c[0] === x && c[1] === y);
+      if (!isFloor) continue;
+      const neighborCount = (function() {
+        let nc = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = x + dx, ny = y + dy;
+            if (nx >= 0 && nx < DW && ny >= 0 && ny < DH && floorCells.some(c => c[0] === nx && c[1] === ny)) nc++;
+          }
+        }
+        return nc;
+      })();
+      if (neighborCount <= 3) {
+        wallCells.push([x, y]);
+      }
+    }
+  }
+  
+  // Add props with level scaling
+  const barrelCount = 8 + Math.floor(player.level / 2);
+  for (let i = 0; i < barrelCount; i++) {
+    const bx = Math.floor(Math.random() * DW);
+    const by = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === bx && c[1] === by)) {
+      const group = new THREE.Group();
+      const barrel = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.35, 0.4, 0.9, 12, 12),
+        new THREE.MeshLambertMaterial({ color: 0x5a4a3a })
+      );
+      barrel.position.y = 0.45;
+      group.add(barrel);
+      const hoop = new THREE.Mesh(
+        new THREE.TorusGeometry(0.38, 0.05, 6, 24, Math.PI),
+        new THREE.MeshLambertMaterial({ color: 0x7a6a5a })
+      );
+      hoop.position.y = 0.48;
+      group.add(hoop);
+      props.push({ type: 'barrel', x: bx, y: by, group });
+    }
+  }
+  
+  const crateCount = 10 + Math.floor(player.level / 3);
+  for (let i = 0; i < crateCount; i++) {
+    const cx = Math.floor(Math.random() * DW);
+    const cy = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === cx && c[1] === cy)) {
+      const group = new THREE.Group();
+      const crate = new THREE.Mesh(
+        new THREE.BoxGeometry(0.6, 0.6, 0.6, 8, 8, 8),
+        new THREE.MeshLambertMaterial({ color: 0x5a4a3a })
+      );
+      crate.position.y = 0.3;
+      group.add(crate);
+      if (Math.random() > 0.5) {
+        const lid = new THREE.Mesh(
+          new THREE.BoxGeometry(0.6, 0.1, 0.4, 8, 2, 4),
+          new THREE.MeshLambertMaterial({ color: 0x7a5a4a })
+        );
+        lid.position.y = 0.55;
+        group.add(lid);
+      }
+      props.push({ type: 'crate', x: cx, y: cy, group });
+    }
+  }
+  
+  // Pillars
+  for (let y = 0; y < DH; y += 4) {
+    for (let x = 0; x < DW; x += 4) {
+      if (floorCells.some(c => c[0] === x && c[1] === y)) {
+        const group = new THREE.Group();
+        const pillar = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.3, 0.3, 1.7, 12, 12),
+          new THREE.MeshLambertMaterial({ color: 0x6b5a33 })
+        );
+        pillar.position.y = 0.85;
+        group.add(pillar);
+        const capital = new THREE.Mesh(
+          new THREE.SphereGeometry(0.32, 12, 12),
+          new THREE.MeshLambertMaterial({ color: 0x5a4a30 })
+        );
+        capital.position.y = 1.75;
+        group.add(capital);
+        props.push({ type: 'pillar', x: x, y: y, group });
+      }
+    }
+  }
+  
+  // Stairs down (bottom-right area)
+  {
+    const stairsX = DW - 3;
+    const stairsY = DH - 3;
+    if (floorCells.some(c => c[0] === stairsX && c[1] === stairsY)) {
+      const stairGroup = new THREE.Group();
+      for (let yy = -1; yy <= 1; yy++) {
+        for (let xx = -1; xx <= 1; xx++) {
+          if (floorCells.some(c => c[0] === stairsX + xx && c[1] === stairsY + yy)) {
+            const step = new THREE.Mesh(
+              new THREE.BoxGeometry(TILE * 0.85, TILE * 0.18, TILE * 0.85),
+              new THREE.MeshLambertMaterial({ color: 0x8b5a2b })
+            );
+            step.position.set(xx * TILE * 0.87, TILE * 0.09 * Math.abs(yy), yy * TILE * 0.87);
+            stairGroup.add(step);
+          }
+        }
+      }
+      const rail = new THREE.Mesh(
+        new THREE.BoxGeometry(TILE * 2.2, TILE * 0.1, TILE * 0.2),
+        new THREE.MeshLambertMaterial({ color: 0x8b7d6b })
+      );
+      rail.position.set(0, TILE * 0.05, 0);
+      stairGroup.add(rail);
+      props.push({ type: 'stairs', x: stairsX, y: stairsY, group: stairGroup });
+    }
+  }
+  
+  // Monsters (scaled for deeper levels)
+  const monsterCount = Math.max(3, 3 + Math.floor(player.level / 2));
+  const monsterTypes = ['skeleton', 'rat', 'slime'];
+  for (let i = 0; i < monsterCount; i++) {
+    const type = monsterTypes[i % 3];
+    const bx = Math.floor(Math.random() * DW);
+    const by = Math.floor(Math.random() * DH);
+    if (floorCells.some(c => c[0] === bx && c[1] === by)) {
+      const m = new Monster(type, bx, by);
+      m.group.userData = { type: type, x: bx, y: by, monster: m };
+      monsters.push(m);
+      monsterSpawns.push({ type: type, x: bx, y: by });
+    }
+  }
+  
+  // Key spawn
+  const keyX = Math.floor(Math.random() * DW);
+  const keyY = Math.floor(Math.random() * DH);
+  if (floorCells.some(c => c[0] === keyX && c[1] === keyY)) {
+    const keyGroup = new THREE.Group();
+    const keyBowl = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.15, 0.2, 0.3, 8, 8),
+      new THREE.MeshLambertMaterial({ color: 0xc8a500 })
+    );
+    keyBowl.position.y = 0.15;
+    keyGroup.add(keyBowl);
+    for (let i = 0; i < 4; i++) {
+      const tooth = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 0.15, 0.3, 4, 4, 1),
+        new THREE.MeshLambertMaterial({ color: 0x8b6a1b })
+      );
+      tooth.position.set(
+        Math.sin(i * Math.PI / 2) * 0.18,
+        0.2 + Math.cos(i * Math.PI / 2) * 0.05,
+        (i % 2 === 0 ? -0.2 : 0.2)
+      );
+      keyGroup.add(tooth);
+    }
+    const keyRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.25, 0.08, 8, 24, Math.PI),
+      new THREE.MeshLambertMaterial({ color: 0xc8a500 })
+    );
+    keyRing.position.y = 0.3;
+    keyRing.rotation.x = Math.PI / 2;
+    keyGroup.add(keyRing);
+    keyGroup.position.set(keyX, 0, keyY);
+    scene.add(keyGroup);
+    props.push({ type: 'key', x: keyX, y: keyY, group: keyGroup });
+    dungeon.keyX = keyX;
+    dungeon.keyY = keyY;
+  } else {
+    dungeon.keyX = keyX;
+    dungeon.keyY = keyY;
+  }
+  
+  // Wooden doors (3 doors, first one locked as key door)
+  const doorCount = 3;
+  for (let i = 0; i < doorCount; i++) {
+    const dx = Math.floor(Math.random() * (DW - 4)) + 2;
+    const dy = Math.floor(Math.random() * (DH - 4)) + 2;
+    if (floorCells.some(c => c[0] === dx && c[1] === dy)) {
+      const group = new THREE.Group();
+      const frame = new THREE.Mesh(
+        new THREE.BoxGeometry(TILE * 0.95, 1.2, 0.1, 6, 6, 1),
+        new THREE.MeshLambertMaterial({ color: 0x5a4a30 })
+      );
+      frame.position.y = 0.6;
+      group.add(frame);
+      for (let j = 0; j < 3; j++) {
+        const panel = new THREE.Mesh(
+          new THREE.BoxGeometry(TILE * 0.3, 1.0, 0.05, 6, 6, 1),
+          new THREE.MeshLambertMaterial({ color: 0x8b5a2b })
+        );
+        panel.position.set(0, 0.5, (j - 1) * TILE * 0.35);
+        panel.rotation.y = (j % 2 === 0) ? Math.PI / 2 : 0;
+        group.add(panel);
+      }
+      const isLocked = (i === 0);
+      group.position.set(dx, 0, dy);
+      props.push({ type: 'woodenDoor', x: dx, y: dy, group, locked: isLocked });
+    }
+  }
+  
+  // Rebuild dungeon meshes
+  buildDungeonMeshes();
+  
+  // Return updated dungeon reference
+  return { floorCells, wallCells, monsterSpawns, props };
+}
 }
 
 // Start game loop
@@ -1284,6 +1961,63 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'c' || e.key === 'C') {
     // Toggle audio
     toggleAudio();
+  }
+  if (e.key === 'e' || e.key === 'E') {
+    ensureAudio();
+    // Key collection: if player is over key grid position
+    if (player.hasKey) {
+      // Already have key, try to unlock door
+      if (dungeon && dungeon.woodenDoors) {
+        for (const dd of dungeon.woodenDoors) {
+          if (dd.locked && Math.abs(dd.x - player.group.position.x) < 1 && Math.abs(dd.y - player.group.position.z) < 1) {
+            dd.locked = false;
+            if (!audioEnabled) playSFX('unlock');
+            document.getElementById('soundHint').textContent = 'door unlocked';
+            // Door unlocked - player can now descend
+            // Descent triggered when player presses E at the unlocked door
+          }
+        }
+      }
+    } else {
+      // Try to pick up key
+      if (dungeon && dungeon.keyX !== undefined) {
+        if (Math.abs(dungeon.keyX - player.group.position.x) < 1 && Math.abs(dungeon.keyY - player.group.position.z) < 1) {
+          player.hasKey = true;
+          // Remove key from scene
+          if (keyGroup && keyGroup.visible) {
+            keyGroup.visible = false;
+          }
+          document.getElementById('soundHint').textContent = 'key obtained';
+        }
+      }
+    }
+  }
+  if (e.key === 'q' || e.key === 'Q') {
+    ensureAudio();
+    // Drink potion if player has one
+    if (player.potionType && player.potionCharges > 0) {
+      player.potionCharges--;
+      // Apply potion effects
+      if (player.potionType === 'health') {
+        player.hp = Math.min(player.maxHp, player.hp + 2);
+        document.getElementById('soundHint').textContent = 'drank potion: health restored';
+      } else if (player.potionType === 'strength') {
+        player.damage = Math.max(1, player.damage - 1);
+        document.getElementById('soundHint').textContent = 'drank potion: strength';
+      } else if (player.potionType === 'speed') {
+        player.speed = Math.max(1, player.speed - 0.2);
+        document.getElementById('soundHint').textContent = 'drank potion: speed';
+      }
+      player.potionCharges--;
+      // Update HUD
+      document.getElementById('potionType').textContent = 'None';
+      document.getElementById('potionIcon').style.display = 'none';
+      if (player.potionCharges <= 0) {
+        player.potionType = null;
+      }
+    } else {
+      document.getElementById('soundHint').textContent = 'no potion';
+    }
   }
 });
 
