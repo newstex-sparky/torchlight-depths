@@ -1178,6 +1178,7 @@ const ditherShader = {
 // Compile the dither shader
 const ditherMaterial = new THREE.ShaderMaterial(ditherShader);
  // Initialize Bayer matrix (16 values 0-15 / 16)
+const BAYER_MATRIX = [0/16, 8/16, 2/16, 10/16, 12/16, 4/16, 14/16, 6/16, 3/16, 11/16, 1/16, 9/16, 15/16, 7/16, 13/16, 5/16];
 for (let i = 0; i < 16; i++) {
   ditherMaterial.uniforms.bayerMatrix.value[i] = BAYER_MATRIX[i];
 }
@@ -1462,8 +1463,8 @@ function updateMonsters(dt) {
     const dz = player.group.position.z - monster.y;
     const dist = Math.sqrt(dx*dx + dz*dz);
     
-    // Monster notices hero within 10 tiles
-    if (dist < 10) {
+    // Monster notices hero within 15 tiles
+    if (dist < 15) {
       // Approach player
       if (dist > 2.0) {
         const moveSpeed = 1.2 * dt;
@@ -1849,7 +1850,7 @@ function generateNewDungeon() {
   }
   
   // Monsters (scaled for deeper levels)
-  const monsterCount = Math.max(3, 3 + Math.floor(player.level / 2));
+  const monsterCount = Math.max(5, 5 + Math.floor(player.level / 2));
   const monsterTypes = ['skeleton', 'rat', 'slime'];
   for (let i = 0; i < monsterCount; i++) {
     const type = monsterTypes[i % 3];

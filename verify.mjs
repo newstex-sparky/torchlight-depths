@@ -124,7 +124,7 @@ const allChecks = {
   canvasNotDefault: canvasSize && (canvasSize.width === 1920 || canvasSize.width > 300),
   threeWorking,
   drawCallsPositive: drawCalls > 0,
-  hudHasValues: hudChanged.hp && hudChanged.depth
+  hudHasValues: Boolean(hudChanged.hp) && Boolean(hudChanged.depth)
 };
 
 console.log('\n=== VERIFICATION SUMMARY ===');
