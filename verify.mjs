@@ -113,10 +113,14 @@ function warmFrac(a) {
   }
   return n ? hit / n : 0;
 }
-// red glow pixel: strong red dominance with suppressed green (excludes warm orange flame)
-function isRedPx(r, g, b) { return r >= 90 && r - g >= 55 && r - b >= 55 && g < 115; }
-// green glow pixel
-function isGreenPx(r, g, b) { return g >= 60 && g - r >= 30 && g - b >= 20; }
+// red glow pixel: strict red dominance with suppressed green (excludes warm orange
+// flame — flame reads amber with g>140; hue-true red stays g<140 with r-g>=75)
+function isRedPx(r, g, b) { return r >= 110 && r - g >= 75 && r - b >= 75 && g < 140; }
+// green glow pixel: strong green dominance (torch-warm pixels can never satisfy it)
+function isGreenPx(r, g, b) { return g >= 80 && g - r >= 45 && g - b >= 35; }
+// cool rim pixels: genuinely cool BLUE channel with clear red separation AND a
+// brighter floor — dim cool ambient alone no longer satisfies this
+function isCoolPx(r, g, b) { return b >= 115 && b - r >= 35; }
 function hueCount(a, pred, box) {
   const x0 = Math.max(0, Math.floor(box ? box.x0 : 0)), x1 = Math.min(a.w - 1, Math.ceil(box ? box.x1 : a.w - 1));
   const y0 = Math.max(0, Math.floor(box ? box.y0 : 0)), y1 = Math.min(a.h - 1, Math.ceil(box ? box.y1 : a.h - 1));
@@ -177,6 +181,10 @@ const drvStart = Date.now();
 let heldDir = 0; // index into travelDirs for the forced-travel walk
 let lastPos = { x: startPos.x, z: startPos.z };
 const travelDirs = ['KeyW', 'KeyD', 'KeyS', 'KeyA'];
+let heroScreenC1 = null, heroScreenC2 = null;
+let prevChaseD = Infinity, lastHostileProbe = -1, chaseStall = 0, chaseSkip = 0;
+// hostile-proof frame (captured in the drive loop or the proof phase below)
+let bufF = null, screensF = null, wispScreenF = null, heroScreenF = null;
 // keyboard drive: real CDP keys by default; if the page demonstrably ignores
 // them (no movement at all 12s in), fall back to synthetic KeyboardEvents so
 // the manual-controls gate still exercises genuine in-game input handling
@@ -189,11 +197,15 @@ const keyUp = (code) => keyMode === 'real'
   : page.evaluate((c) => window.dispatchEvent(new KeyboardEvent('keyup', { code: c, bubbles: true })), code);
 while (Date.now() - drvStart < 40000) {
   const elapsed = Date.now() - drvStart;
-  if (elapsed > 10500 && !bufC1) bufC1 = await page.screenshot();
+  if (elapsed > 10500 && !bufC1) {
+    bufC1 = await page.screenshot();
+    heroScreenC1 = await page.evaluate(() => window.__tl.heroScreen());
+  }
   if (elapsed > 20500 && !bufC2) {
     bufC2 = await page.screenshot();
-    // monster screen positions captured in the same frame window as bufC2
+    // monster/wisp/hero screen positions captured in the same frame window as bufC2
     screensC2 = await page.evaluate(() => window.__tl.monsterScreens());
+    heroScreenC2 = await page.evaluate(() => window.__tl.heroScreen());
   }
   const st = await page.evaluate(() => ({ x: window.__tl.player.x, z: window.__tl.player.z, mons: window.__tl.monstersAt() }));
   const dispNow = Math.hypot(st.x - startPos.x, st.z - startPos.z);
@@ -201,6 +213,12 @@ while (Date.now() - drvStart < 40000) {
     keyMode = 'synthetic';
     console.log('NOTE: real keyboard produced zero movement at 12s — switching to synthetic key injection');
   }
+  // candidate distances, computed once per tick — used for chase targeting AND
+  // for the attack trigger (attack whichever monster happens to be in reach)
+  const cands = st.mons
+    .map(m => ({ m, d: Math.hypot(m.x - st.x, m.z - st.z) }))
+    .sort((a, b) => a.d - b.d);
+  const inReach = cands.length > 0 && cands[0].d < 1.9;
   let target = null, bd = Infinity, travel = null;
   if (elapsed > 18000 && dispNow < 5.5) {
     // forced travel: rotate through directions, skipping blocked ones
@@ -208,11 +226,25 @@ while (Date.now() - drvStart < 40000) {
     if (moved < 0.08) heldDir = (heldDir + 1) % travelDirs.length;
     travel = travelDirs[heldDir];
   } else {
-    for (const m of st.mons) {
-      const d = Math.hypot(m.x - st.x, m.z - st.z);
-      if (d < bd) { bd = d; target = m; }
-    }
+    // candidate rotation: chase the chaseSkip-th nearest monster so a target
+    // sealed in another room can never stall the whole session
+    target = cands.length ? cands[Math.min(chaseSkip, cands.length - 1)].m : null;
+    bd = target ? Math.hypot(target.x - st.x, target.z - st.z) : Infinity;
     if (target && bd < 30) {
+      // stalled chase (monster unreachable through a wall): a sidestep tap
+      // every tick cycles around obstacles; 10 stalled ticks moves on to the
+      // next candidate
+      if (bd > 2.2 && bd > prevChaseD - 0.06) {
+        await keyDown(travelDirs[heldDir]);
+        await page.waitForTimeout(120);
+        await keyUp(travelDirs[heldDir]);
+        heldDir = (heldDir + 1) % travelDirs.length;
+        chaseStall++;
+        if (chaseStall >= 10) { chaseSkip++; chaseStall = 0; }
+      } else {
+        chaseStall = 0;
+      }
+      prevChaseD = bd;
       const dx = target.x - st.x, dz = target.z - st.z;
       if (dx > 0.25) travel = 'KeyD'; else if (dx < -0.25) travel = 'KeyA';
       else if (dz > 0.25) travel = 'KeyS'; else if (dz < -0.25) travel = 'KeyW';
@@ -220,7 +252,7 @@ while (Date.now() - drvStart < 40000) {
   }
   if (!travel) travel = travelDirs[heldDir];
   await keyDown(travel);
-  if (target && bd < 1.9) {
+  if (inReach) {
     await keyDown('Space');
     await page.waitForTimeout(90);
     await keyUp('Space');
@@ -228,20 +260,47 @@ while (Date.now() - drvStart < 40000) {
   await page.waitForTimeout(260);
   await keyUp(travel);
   lastPos = st;
+  // hostile-proof capture inline: from ~22s into the drive, probe every ~1.5s
+  // for a hostile monster in frame and grab that frame on sight — the dedicated
+  // proof phase afterwards only runs if no hostile ever showed up
+  if (!bufF && elapsed > 22000) {
+    const bucket = Math.floor(elapsed / 1500);
+    if (bucket !== lastHostileProbe) {
+      lastHostileProbe = bucket;
+      const scr = await page.evaluate(() => ({ mons: window.__tl.monsterScreens(), wisp: window.__tl.wispScreen(), hero: window.__tl.heroScreen() }));
+      const central = scr.mons.some(s => s.hostile && s.sx > 260 && s.sx < 1660 && s.sy > 160 && s.sy < 860);
+      const loose = scr.mons.some(s => s.hostile && s.sx > 60 && s.sx < 1860 && s.sy > 60 && s.sy < 1020);
+      if (central || loose) {
+        bufF = await page.screenshot();
+        screensF = scr.mons;
+        wispScreenF = scr.wisp;
+        heroScreenF = scr.hero;
+        console.log('hostile-proof frame captured inline at t=' + Math.round(elapsed / 1000) + 's');
+      }
+    }
+  }
 }
 if (!bufC1) bufC1 = await page.screenshot();
+if (!heroScreenC1) heroScreenC1 = await page.evaluate(() => window.__tl.heroScreen());
 if (!bufC2) bufC2 = await page.screenshot();
 if (!screensC2) screensC2 = await page.evaluate(() => window.__tl.monsterScreens());
+if (!heroScreenC2) heroScreenC2 = await page.evaluate(() => window.__tl.heroScreen());
 
 // ==================== GATE E PROOF PHASE: faction-glow mid-combat frame ====================
 // keep playing (same keyboard-only drive) until an engaged hostile monster is on
-// screen, then capture that frame plus monster/wisp screen coordinates
-let bufF = null, screensF = null, wispScreenF = null;
+// screen, then capture that frame plus monster/wisp screen coordinates.
+// bufF may already have been captured inline by the drive loop above.
 const proofStart = Date.now();
-while (Date.now() - proofStart < 18000 && !bufF) {
+let proofRotIdx = 0, prevNearestD = Infinity, proofStall = 0, proofSkip = 0;
+while (Date.now() - proofStart < 30000 && !bufF) {
   const st = await page.evaluate(() => ({ x: window.__tl.player.x, z: window.__tl.player.z, mons: window.__tl.monstersAt() }));
-  let target = null, bd = Infinity;
-  for (const m of st.mons) { const d = Math.hypot(m.x - st.x, m.z - st.z); if (d < bd) { bd = d; target = m; } }
+  // candidate rotation, same policy as the drive loop: never grind forever on
+  // a sealed target
+  const cands = st.mons
+    .map(m => ({ m, d: Math.hypot(m.x - st.x, m.z - st.z) }))
+    .sort((a, b) => a.d - b.d);
+  const target = cands.length ? cands[Math.min(proofSkip, cands.length - 1)].m : null;
+  const bd = target ? Math.hypot(target.x - st.x, target.z - st.z) : Infinity;
   let travel = null;
   if (target) {
     const dx = target.x - st.x, dz = target.z - st.z;
@@ -249,6 +308,20 @@ while (Date.now() - proofStart < 18000 && !bufF) {
     else if (dz > 0.25) travel = 'KeyS'; else if (dz < -0.25) travel = 'KeyW';
   }
   if (!travel) travel = 'KeyD';
+  // stalled chase (monster unreachable through a wall): sidestep-cycle so the
+  // probe can still drift around obstacles and flip a nearby monster hostile
+  const stalled = target && bd > 2.2 && bd > prevNearestD - 0.06;
+  prevNearestD = bd;
+  if (stalled) {
+    await keyDown(travelDirs[proofRotIdx]);
+    await page.waitForTimeout(140);
+    await keyUp(travelDirs[proofRotIdx]);
+    proofRotIdx = (proofRotIdx + 1) % travelDirs.length;
+    proofStall++;
+    if (proofStall >= 10) { proofSkip++; proofStall = 0; }
+  } else {
+    proofStall = 0;
+  }
   await keyDown(travel);
   if (target && bd < 1.9) {
     await keyDown('Space');
@@ -257,14 +330,29 @@ while (Date.now() - proofStart < 18000 && !bufF) {
   }
   await page.waitForTimeout(260);
   await keyUp(travel);
-  const scr = await page.evaluate(() => ({ mons: window.__tl.monsterScreens(), wisp: window.__tl.wispScreen() }));
-  if (scr.mons.some(s => s.hostile && s.sx > 60 && s.sx < 1860 && s.sy > 60 && s.sy < 1020)) {
+  const scr = await page.evaluate(() => ({ mons: window.__tl.monsterScreens(), wisp: window.__tl.wispScreen(), hero: window.__tl.heroScreen() }));
+  // central hostiles read through tilt-shift/vignette; prefer them, fall back to
+  // any in-frame hostile after 10s so a random layout can never stall the proof
+  const central = scr.mons.some(s => s.hostile && s.sx > 260 && s.sx < 1660 && s.sy > 160 && s.sy < 860);
+  const loose = scr.mons.some(s => s.hostile && s.sx > 60 && s.sx < 1860 && s.sy > 60 && s.sy < 1020);
+  if ((central || (Date.now() - proofStart > 10000 && loose))) {
     bufF = await page.screenshot();
     screensF = scr.mons;
     wispScreenF = scr.wisp;
+    heroScreenF = scr.hero;
   }
 }
-console.log('faction proof frame: ' + (bufF ? 'captured' : 'NOT captured (no hostile monster on screen in 18s)'));
+console.log('faction proof frame: ' + (bufF ? 'captured (hostile on screen)' : 'captured (wisp anchor fallback, no hostile on screen)'));
+if (!bufF) {
+  // no hostile made it on screen this run (random dungeon) — still capture the
+  // live frame so the wisp green proof stays anchored to the wisp's real screen
+  // position and the rim probe gets a genuine mid-combat frame
+  bufF = await page.screenshot();
+  const scr = await page.evaluate(() => ({ mons: window.__tl.monsterScreens(), wisp: window.__tl.wispScreen(), hero: window.__tl.heroScreen() }));
+  screensF = scr.mons;
+  wispScreenF = scr.wisp;
+  heroScreenF = scr.hero;
+}
 const aF = bufF ? await screenshotAnalysis(bufF) : null;
 
 const aC1 = await screenshotAnalysis(bufC1);
@@ -390,25 +478,53 @@ gate('Gate D: every alive monster carries faction yellow-or-red glow',
   `monsters=${JSON.stringify((visuals.monsters || []).slice(0, 8))}`);
 
 // --- Gate E: pixel proof of faction glow on the faction-proof mid-combat frame ---
-const warm = warmFrac(aF || aC2);
+// All hue gates are tightened AND anchored to entity screen positions:
+//   red   -> strict red-dominance probe inside +-70px of each hostile monster
+//   green -> strict green-dominance probe inside +-80px of the wisp's own screen
+//            position (wisp must also be inside the camera frame; the stale
+//            whole-frame fallback is diagnostic only and cannot satisfy the gate)
+//   rim   -> cool blue-dominant pixels inside +-170px of the hero screen position
+//            (proves the cool rim edge exists where the hero actually renders)
+const warm = warmFrac(aC2);
 gate('Gate E: warm torch pool intact on mid-combat frame (>2% amber pixels)', warm > 0.02, `warmFrac=${(warm * 100).toFixed(2)}%`);
-// red glow: probe all hostile-on-screen monster boxes across proof frame + combat frames
+
+// strict red probe anchored to hostile monster screen positions on proof + combat frames
+const RED_BOX = 70, RED_MIN = 60;
 const redSources = [];
-if (aF && screensF) for (const s of screensF.filter(s => s.hostile && s.sx >= -50 && s.sx <= 1970 && s.sy >= -50 && s.sy <= 1130)) {
-  redSources.push({ a: aF, sx: s.sx, sy: s.sy });
+if (aF && screensF) for (const s of screensF.filter(s => s.hostile && s.sx >= 40 && s.sx <= 1880 && s.sy >= 40 && s.sy <= 1040)) {
+  redSources.push({ a: aF, sx: s.sx, sy: s.sy, frame: 'proof' });
 }
-for (const s of (screensC2 || []).filter(s => s.hostile && s.sx >= -50 && s.sx <= 1970 && s.sy >= -50 && s.sy <= 1130)) {
-  if (aC2) redSources.push({ a: aC2, sx: s.sx, sy: s.sy });
+for (const s of (screensC2 || []).filter(s => s.hostile && s.sx >= 40 && s.sx <= 1880 && s.sy >= 40 && s.sy <= 1040)) {
+  if (aC2) redSources.push({ a: aC2, sx: s.sx, sy: s.sy, frame: 'combat2' });
 }
-const redBest = Math.max(0, ...redSources.map(r => r.a ? hueCount(r.a, isRedPx, { x0: r.sx - 110, x1: r.sx + 110, y0: r.sy - 110, y1: r.sy + 110 }) : 0));
-gate('Gate E: red glow pixels near an engaged (hostile) monster screen region', redBest > 24,
-  `redPxBest=${redBest} redSources=${redSources.length}${screensF ? ' proof=' + JSON.stringify(screensF.slice(0, 4)) : ' (no proof frame)'}`);
-// green glow: wisp box at its proof-frame screen position, falling back to whole-frame scan
-const wispBox = wispScreenF ? hueCount(aF, isGreenPx, { x0: wispScreenF.sx - 130, x1: wispScreenF.sx + 130, y0: wispScreenF.sy - 130, y1: wispScreenF.sy + 130 }) : -1;
-const greenWhole = hueCount(aF || aC2, isGreenPx) + hueCount(aIdle, isGreenPx);
-const greenPx = Math.max(0, wispBox, greenWhole);
-gate('Gate E: wisp green glow pixels detected near its screen position', greenPx > 15,
-  `greenPx=${greenPx} (wispBox=${wispBox || wispBox === 0 ? wispBox : 'n/a'}, wholeFrame=${greenWhole})`);
+const redScores = redSources.map(r => ({ ...r, n: hueCount(r.a, isRedPx, { x0: r.sx - RED_BOX, x1: r.sx + RED_BOX, y0: r.sy - RED_BOX, y1: r.sy + RED_BOX }) }));
+const redBest = Math.max(0, ...redScores.map(r => r.n));
+gate('Gate E: strict red glow pixels within ' + (RED_BOX) + 'px of an engaged hostile monster', redSources.length >= 1 && redBest > RED_MIN,
+  `redPxBest=${redBest}/${RED_MIN} redSources=${redSources.length}${screensF ? ' proof=' + JSON.stringify(screensF.slice(0, 4)) : ' (no proof frame)'}`);
+
+// strict green probe anchored to the wisp's own proof-frame screen position
+const GREEN_BOX = 80, GREEN_MIN = 40;
+const wispInFrame = !!(wispScreenF && wispScreenF.sx > 40 && wispScreenF.sx < 1880 && wispScreenF.sy > 40 && wispScreenF.sy < 1040);
+const wispBox = (wispInFrame && aF) ? hueCount(aF, isGreenPx, { x0: wispScreenF.sx - GREEN_BOX, x1: wispScreenF.sx + GREEN_BOX, y0: wispScreenF.sy - GREEN_BOX, y1: wispScreenF.sy + GREEN_BOX }) : -1;
+const greenWholeDiag = hueCount(aF || aC2, isGreenPx); // diagnostic only, never satisfies the gate
+gate('Gate E: strictly-green wisp pixels at its own screen position (in-frame)', wispInFrame && wispBox > GREEN_MIN,
+  `wispPx=${wispBox > -1 ? wispBox : 'n/a'}/${GREEN_MIN} wholeFrame(_diag)=${greenWholeDiag} wispScreen=${JSON.stringify(wispScreenF)}`);
+
+// cool rim probe anchored to the hero screen position on combat + proof frames
+const RIM_BOX = 170, RIM_MIN = 120;
+const rimCandidates = [];
+for (const [name, a, hs] of [['combat1', aC1, heroScreenC1], ['combat2', aC2, heroScreenC2], ['proof', aF, heroScreenF]]) {
+  if (a && hs) rimCandidates.push({ name, a, hs });
+}
+const rimScores = rimCandidates.map(rc => ({ name: rc.name, n: hueCount(rc.a, isCoolPx, { x0: rc.hs.sx - RIM_BOX, x1: rc.hs.sx + RIM_BOX, y0: rc.hs.sy - RIM_BOX, y1: rc.hs.sy + RIM_BOX }) }));
+const rimBest = Math.max(0, ...rimScores.map(r => r.n));
+gate('Gate E: cool rim-light pixels near the hero screen position (hero not a dark silhouette)', rimBest > RIM_MIN,
+  `coolPxBest=${rimBest}/${RIM_MIN} perFrame=${JSON.stringify(rimScores.map(r => ({ f: r.name, n: r.n })))}`);
+
+console.log('\nGate E calibration diagnostics:', JSON.stringify({
+  redScores: redScores.map(r => ({ frame: r.frame, sx: Math.round(r.sx), sy: Math.round(r.sy), n: r.n })),
+  redBest, wispBox, greenWholeDiag, wispScreenF, rimScores: rimScores.map(r => r), rimBest, heroScreenC2, heroScreenF,
+}));
 
 console.log('\n=== VERIFICATION SUMMARY ===');
 for (const c of checks) console.log(`${c.pass ? 'PASS' : 'FAIL'}  ${c.name}  (${c.detail})`);
