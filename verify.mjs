@@ -134,6 +134,19 @@ function hueCount(a, pred, box) {
 
 const t0 = Date.now();
 
+// hostile-proof capture tiering: big hostiles (skeleton/slime/boss) near frame
+// centre capture first — rats are tiny and often slide behind foreground blocks;
+// timed fallbacks guarantee a capture even when only a rat is available
+const bigKind = (s) => s.hostile && (s.kind === 'skeleton' || s.kind === 'boss' || s.kind === 'slime');
+const inCenter = (s) => s.sx > 500 && s.sx < 1420 && s.sy > 200 && s.sy < 880;
+const inLoose = (s) => s.sx > 60 && s.sx < 1860 && s.sy > 60 && s.sy < 1020;
+function hostileCaptureOk(mons, elapsedMs) {
+  if (mons.some(s => bigKind(s) && inCenter(s))) return true;
+  if (elapsedMs > 12000 && mons.some(s => s.hostile && inCenter(s))) return true;
+  if (elapsedMs > 20000 && mons.some(s => s.hostile && inLoose(s))) return true;
+  return false;
+}
+
 // ==================== GATE A: IDLE PHASE (no start interaction) ====================
 await page.waitForTimeout(1500); // let the module settle
 
@@ -268,9 +281,7 @@ while (Date.now() - drvStart < 40000) {
     if (bucket !== lastHostileProbe) {
       lastHostileProbe = bucket;
       const scr = await page.evaluate(() => ({ mons: window.__tl.monsterScreens(), wisp: window.__tl.wispScreen(), hero: window.__tl.heroScreen() }));
-      const central = scr.mons.some(s => s.hostile && s.sx > 260 && s.sx < 1660 && s.sy > 160 && s.sy < 860);
-      const loose = scr.mons.some(s => s.hostile && s.sx > 60 && s.sx < 1860 && s.sy > 60 && s.sy < 1020);
-      if (central || loose) {
+      if (hostileCaptureOk(scr.mons, elapsed - 22000)) {
         bufF = await page.screenshot();
         screensF = scr.mons;
         wispScreenF = scr.wisp;
@@ -331,11 +342,7 @@ while (Date.now() - proofStart < 30000 && !bufF) {
   await page.waitForTimeout(260);
   await keyUp(travel);
   const scr = await page.evaluate(() => ({ mons: window.__tl.monsterScreens(), wisp: window.__tl.wispScreen(), hero: window.__tl.heroScreen() }));
-  // central hostiles read through tilt-shift/vignette; prefer them, fall back to
-  // any in-frame hostile after 10s so a random layout can never stall the proof
-  const central = scr.mons.some(s => s.hostile && s.sx > 260 && s.sx < 1660 && s.sy > 160 && s.sy < 860);
-  const loose = scr.mons.some(s => s.hostile && s.sx > 60 && s.sx < 1860 && s.sy > 60 && s.sy < 1020);
-  if ((central || (Date.now() - proofStart > 10000 && loose))) {
+  if (hostileCaptureOk(scr.mons, Date.now() - proofStart)) {
     bufF = await page.screenshot();
     screensF = scr.mons;
     wispScreenF = scr.wisp;
