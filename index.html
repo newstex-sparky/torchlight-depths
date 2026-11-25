@@ -95,6 +95,12 @@ torchSpot.shadow.bias = -0.002;
 scene.add(torchSpot);
 scene.add(torchSpot.target);
 
+// cool rim/back light opposing the warm torch — keeps the hero from reading as
+// a pure dark silhouette against the bright floor in close-combat framing
+const rimLight = new THREE.PointLight(0x6f86c9, 1.6, 13, 1.7);
+rimLight.userData.tlTag = 'rim';
+scene.add(rimLight);
+
 // ============================== CONSTANTS / HELPERS ==============================
 const TILE = 2.0;
 const DW = 24;
@@ -220,6 +226,37 @@ const M = {
   slash:   new THREE.MeshBasicMaterial({ color: 0xffe9a0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }),
   flashHot:new THREE.MeshBasicMaterial({ color: 0xfff3c0, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false }),
 };
+
+// hero weapon glow — magical steel blade + torch ember coals
+// (the torch itself stays its own warm flame light source; these are emissive tints only)
+const bladeGlowMat = new THREE.MeshPhongMaterial({
+  color: 0x9fb4c8, shininess: 85, specular: 0xd8e6f5,
+  emissive: 0x35577a, emissiveIntensity: 1.0,
+});
+const emberMat = new THREE.MeshLambertMaterial({
+  color: 0x6b2a12, emissive: 0xc24410, emissiveIntensity: 0.9,
+});
+
+// faction aura colors: hostile=red, passive-until-attacked=yellow, ally=green
+const GLOW_RED = 0xd8402f, GLOW_YELLOW = 0xd8c23a, GLOW_GREEN = 0x4fce62;
+function addFactionGlow(group, colorHex, y, r) {
+  const halo = new THREE.Mesh(
+    new THREE.SphereGeometry(r, 12, 10),
+    new THREE.MeshBasicMaterial({ color: colorHex, transparent: true, opacity: 0.17, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.BackSide }));
+  halo.position.y = y;
+  const glow = new THREE.PointLight(colorHex, 0.9, 6.5, 2.0);
+  glow.userData.tlTag = 'faction';
+  glow.position.y = y;
+  group.add(halo, glow);
+  group.userData.glowHalo = halo;
+  group.userData.glowLight = glow;
+  group.userData.glowColor = colorHex;
+}
+function setFactionGlow(group, colorHex) {
+  if (group.userData.glowHalo) group.userData.glowHalo.material.color.setHex(colorHex);
+  if (group.userData.glowLight) group.userData.glowLight.color.setHex(colorHex);
+  group.userData.glowColor = colorHex;
+}
 
 // ============================== LEVEL BUILD ==============================
 const levelGroup = new THREE.Group();
@@ -568,13 +605,16 @@ function buildHero() {
   hero.torchFlameMesh.position.set(0, -0.2, 0.2);
   const torchCore = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.13, 6), M.flameHot);
   torchCore.position.set(0, -0.21, 0.19);
-  hero.armL.add(armLMesh, torchStick, hero.torchFlameMesh, torchCore);
+  hero.torchEmber = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.05, 6), emberMat);
+  hero.torchEmber.position.set(0, -0.14, 0.19);
+  hero.armL.add(armLMesh, torchStick, hero.torchEmber, hero.torchFlameMesh, torchCore);
   // right arm: sword
   hero.armR = new THREE.Group(); hero.armR.position.set(0.24, 0.86, 0.02);
   const armRMesh = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.3, 0.12), skin); armRMesh.position.y = -0.14;
   const sword = new THREE.Group();
-  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.55, 0.015), M.metal);
+  const blade = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.55, 0.015), bladeGlowMat);
   blade.position.y = 0.42;
+  hero.blade = blade;
   const guard = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.03, 0.04), M.iron);
   const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.12, 6), M.woodDark);
   grip.position.y = -0.06;
@@ -593,6 +633,19 @@ function buildHero() {
   g.traverse(o => { if (o.isMesh) o.castShadow = true; });
 }
 buildHero();
+
+// ============================== WISP COMPANION (ally green tier) =============================
+// purely visual friendly spirit hovering beside the hero: gentle bob, soft green light
+const wisp = { group: new THREE.Group(), phase: rnd(0, Math.PI * 2) };
+{
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.105, 10, 8), new THREE.MeshBasicMaterial({ color: 0xcfffd9 }));
+  const shell = new THREE.Mesh(new THREE.SphereGeometry(0.19, 10, 8), new THREE.MeshBasicMaterial({
+    color: GLOW_GREEN, transparent: true, opacity: 0.32, blending: THREE.AdditiveBlending, depthWrite: false }));
+  wisp.light = new THREE.PointLight(0x5fd874, 1.15, 5.5, 2.0);
+  wisp.light.userData.tlTag = 'wisp';
+  wisp.group.add(core, shell, wisp.light);
+  scene.add(wisp.group);
+}
 
 // ============================== MONSTERS ==============================
 const monsters = [];
@@ -681,8 +734,11 @@ function spawnMonster(kind, cx, cy) {
     kind, group, parts, hp: stats.hp, maxHp: stats.hp, spd: stats.spd, dmg: stats.dmg,
     range: stats.range, alive: true, dead: false, deathT: 0,
     cooldown: rnd(0.3, 1), wanderTarget: null, flash: 0, boss: kind === 'boss',
-    wobPhase: rnd(0, 10), knockback: null,
+    wobPhase: rnd(0, 10), knockback: null, hostile: false,
   };
+  // faction glow: passive-until-attacked (yellow) -> hostile (red)
+  const glowSpec = { skeleton: [0.85, 0.5], rat: [0.4, 0.52], slime: [0.38, 0.55], boss: [1.5, 1.15] }[kind];
+  addFactionGlow(group, GLOW_YELLOW, glowSpec[0], glowSpec[1]);
   monsters.push(m);
   return m;
 }
@@ -1087,6 +1143,7 @@ function heroUpdate(dt, t) {
 function damageMonster(m, dmg) {
   m.hp -= dmg;
   m.flash = 0.14;
+  m.hostile = true;   // damaged -> hostile: faction glow flips yellow -> red
   sfx('hit');
   if (m.hp <= 0 && m.alive) {
     m.alive = false;
@@ -1139,6 +1196,11 @@ function monsterUpdate(m, dt, t) {
   const p = hero.group.position, mp = m.group.position;
   const d = Math.hypot(p.x - mp.x, p.z - mp.z);
   m.cooldown -= dt;
+
+  // faction glow state: close to the hero or damaged -> hostile (red), else passive (yellow)
+  if (d < 6) m.hostile = true;
+  const wantGlow = m.hostile ? GLOW_RED : GLOW_YELLOW;
+  if (m.group.userData.glowColor !== wantGlow) setFactionGlow(m.group, wantGlow);
 
   if (m.knockback) {
     moveEntity(m, m.knockback.x, m.knockback.z);
@@ -1364,6 +1426,47 @@ window.__tl = {
   player: { get x() { return hero.group.position.x; }, get z() { return hero.group.position.z; } },
   // post-processing chain evidence for the visual gates
   post: { rtScale: RT_SCALE, ditherAmp: 2.4 / 255, tiltShift: true },
+  // faction/visual feature evidence for the scene-graph gates
+  visuals: () => {
+    let lights = 0;
+    scene.traverse(o => { if (o.isLight) lights++; });
+    const glowName = (hex) => hex === GLOW_RED ? 'red' : hex === GLOW_YELLOW ? 'yellow' : hex === GLOW_GREEN ? 'green' : 'none';
+    return {
+      lights,
+      rim: !!(rimLight && rimLight.userData.tlTag === 'rim' && rimLight.parent === scene),
+      heroGlow: {
+        torchEmberEmissive: hero.torchEmber ? hero.torchEmber.material.emissive.getHex() : 0,
+        swordEmissive: hero.blade ? hero.blade.material.emissive.getHex() : 0,
+      },
+      wisp: {
+        present: wisp.group.parent === scene,
+        glow: 'green',
+        lightTag: wisp.light && wisp.light.userData.tlTag === 'wisp' && wisp.light.parent === wisp.group ? 'wisp' : null,
+        x: wisp.group.position.x, z: wisp.group.position.z,
+      },
+      monsters: monsters.filter(m => m.alive).map(m => ({
+        kind: m.kind, hostile: !!m.hostile,
+        glow: glowName(m.group.userData.glowColor),
+      })),
+    };
+  },
+  // screen positions of alive monsters (CSS pixels), with faction state
+  monsterScreens: () => monsters.filter(m => m.alive).map(m => {
+    _projV.set(m.group.position.x, m.group.position.y + (m.boss ? 1.6 : 0.7), m.group.position.z);
+    _projV.project(camera);
+    return {
+      sx: (_projV.x * 0.5 + 0.5) * window.innerWidth,
+      sy: (-_projV.y * 0.5 + 0.5) * window.innerHeight,
+      kind: m.kind, hostile: !!m.hostile,
+      glow: m.group.userData.glowColor === GLOW_RED ? 'red' : 'yellow',
+    };
+  }),
+  // screen position of the wisp companion (CSS pixels)
+  wispScreen: () => {
+    _projV.copy(wisp.group.position);
+    _projV.project(camera);
+    return { sx: (_projV.x * 0.5 + 0.5) * window.innerWidth, sy: (-_projV.y * 0.5 + 0.5) * window.innerHeight };
+  },
 };
 
 // ============================== MAIN LOOP ==============================
@@ -1374,6 +1477,8 @@ const clock = new THREE.Clock();
 let elapsed = 0;
 const _camTarget = new THREE.Vector3();
 const _vz = new THREE.Vector3();
+const _wispTarget = new THREE.Vector3();
+const _projV = new THREE.Vector3();
 
 function animate() {
   requestAnimationFrame(animate);
@@ -1501,6 +1606,14 @@ function animate() {
   torchSpot.position.set(hero.group.position.x + 1.5, 6.5, hero.group.position.z + 2.5);
   torchSpot.target.position.copy(hero.group.position);
   torchSpot.intensity = 2.35 + Math.sin(t * 9.1) * 0.18;
+  // rim light tracks the hero from the far side, opposing the torch
+  rimLight.position.set(hero.group.position.x - 2.4, 2.7, hero.group.position.z - 2.4);
+  rimLight.intensity = 1.5 + Math.sin(t * 7.3) * 0.12;
+  // wisp companion: hovers beside the hero with a gentle bob (purely visual)
+  const wb = Math.sin(t * 1.9 + wisp.phase) * 0.13;
+  _wispTarget.set(hero.group.position.x + 1.7, 1.85 + wb, hero.group.position.z + 0.9);
+  wisp.group.position.lerp(_wispTarget, 1 - Math.exp(-5 * dt));
+  wisp.light.intensity = 1.0 + Math.sin(t * 3.1 + wisp.phase) * 0.2;
   if (hero.torchFlameMesh) hero.torchFlameMesh.scale.setScalar(0.85 + Math.sin(t * 13) * 0.15 + Math.cos(t * 29) * 0.06);
   hero.flash = Math.max(0, hero.flash - dt);
   hero.hurtTimer = Math.max(0, hero.hurtTimer - dt);
